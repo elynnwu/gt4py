@@ -23,11 +23,10 @@ out="gt4py_tests_${BUILD_ID}.out"
 /bin/sed -i 's|<NTASKSPERNODE>|'"${nthreads}"'|g' ${script}
 /bin/sed -i 's|<CPUSPERTASK>|1|g' ${script}
 /bin/sed -i 's|<OUTFILE>|'"${out}"'|g' ${script}
-# This works manually but not here, cat instead
-#/bin/sed -i -e '/<CMD>/ r ${RUN_CMD_FILE}' ${script}
 /bin/sed -i 's|<CMD>|'"bash ${RUN_CMD_FILE}"'|g' ${script}
 /bin/sed -i 's|<PARTITION>|'"cscsci"'|g' ${script}
 cat ${script}
+
 # submit SLURM job
 launch_job ${script} ${maxsleep}
 if [ $? -ne 0 ] ; then
