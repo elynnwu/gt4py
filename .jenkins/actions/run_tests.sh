@@ -27,8 +27,7 @@ out="gt4py_tests_${BUILD_ID}.out"
 #/bin/sed -i -e '/<CMD>/ r ${RUN_CMD_FILE}' ${script}
 /bin/sed -i 's|<CMD>|'"bash ${RUN_CMD_FILE}"'|g' ${script}
 /bin/sed -i 's|<PARTITION>|'"cscsci"'|g' ${script}
-#cat ${RUN_CMD_FILE} >> ${script}
-#cat ${script}
+cat ${script}
 # submit SLURM job
 launch_job ${script} ${maxsleep}
 if [ $? -ne 0 ] ; then
