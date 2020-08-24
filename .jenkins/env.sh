@@ -1,3 +1,4 @@
+#!/bin/bash
 envdir="${envloc}/env"
 if [ -d "${envdir}" ] ; then
     pushd "${envdir}" > /dev/null
