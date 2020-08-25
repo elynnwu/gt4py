@@ -11,7 +11,7 @@
 ### Some environment variables available from Jenkins
 ### Note: for a complete list see https://jenkins.ginko.ch/env-vars.html
 # host_machine              The name of the build host (daint, kesch, ...).
-# BUILD_NUMBER       The current build number, such as "153".
+# BUILD_NUMBER       The current bild number, such as "153".
 # BUILD_ID           The current build id, such as "2005-08-22_23-59-59" (YYYY-MM-DD_hh-mm-ss).
 # BUILD_DISPLAY_NAME The display name of the current build, something like "#153" by default.
 # NODE_NAME          Name of the host.
