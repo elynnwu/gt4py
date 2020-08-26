@@ -9,6 +9,7 @@ if [ -d "${envdir}" ] ; then
     popd
 else
     `git clone https://github.com/VulcanClimateModeling/buildenv ${envdir} &>/dev/null`
+    `cd ${envdir} && git checkout slurmvar &>/dev/null`
     if [ $? -ne 0 ] ; then
         echo "Error: Could not download the buildenv (https://github.com/VulcanClimateModeling/buildenv) into ${envdir}. Aborting."
         exit 1
