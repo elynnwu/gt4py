@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 pip3 install --upgrade wheel
 python3 -m pip install --user virtualenv
 python3 -m venv gt4pyenv
