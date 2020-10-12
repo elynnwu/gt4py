@@ -21,7 +21,7 @@ import inspect
 import itertools
 import numbers
 import types
-from typing import List
+from typing import List, Set
 
 import numpy as np
 
@@ -1110,7 +1110,12 @@ class IRMaker(ast.NodeVisitor):
 
 
 class CollectLocalSymbolsAstVisitor(ast.NodeVisitor):
-    def __call__(self, node: ast.FunctionDef):
+    @classmethod
+    def apply(cls, node: ast.FunctionDef) -> Set[str]:
+        instance = cls()
+        return instance(node)
+
+    def __call__(self, node: ast.FunctionDef) -> Set[str]:
         self.local_symbols = set()
         self.visit(node)
         result = self.local_symbols
@@ -1155,8 +1160,8 @@ class GTScriptParser(ast.NodeVisitor):
         result += "\n}"
         return result
 
-    @staticmethod
-    def annotate_definition(definition):
+    @classmethod
+    def annotate_definition(cls, definition, externals=None):
         api_signature = []
         api_annotations = []
 
@@ -1213,6 +1218,17 @@ class GTScriptParser(ast.NodeVisitor):
         nonlocal_symbols, imported_symbols = GTScriptParser.collect_external_symbols(definition)
         canonical_ast = gt_meta.ast_dump(definition)
 
+        # Recursively annotate gtscript functions called
+        # nonlocals
+        for name, symbol in nonlocal_symbols.items():
+            if hasattr(symbol, "_gtscript_"):
+                cls.annotate_definition(symbol, externals=nonlocal_symbols)
+
+        # externals
+        for name in imported_symbols.keys():
+            if name in externals and hasattr(externals[name], "_gtscript_"):
+                cls.annotate_definition(externals[name], externals=nonlocal_symbols)
+
         definition._gtscript_ = dict(
             qualified_name=qualified_name,
             api_signature=api_signature,
@@ -1257,8 +1273,7 @@ class GTScriptParser(ast.NodeVisitor):
         )
 
         gtscript_ast = ast.parse(gt_meta.get_ast(definition)).body[0]
-        local_symbol_collector = CollectLocalSymbolsAstVisitor()
-        local_symbols = local_symbol_collector(gtscript_ast)
+        local_symbols = CollectLocalSymbolsAstVisitor.apply(gtscript_ast)
 
         nonlocal_symbols = {}
 
@@ -1528,7 +1543,7 @@ class GTScriptFrontend(gt_frontend.Frontend):
 
     @classmethod
     def prepare_stencil_definition(cls, definition, externals):
-        GTScriptParser.annotate_definition(definition)
+        GTScriptParser.annotate_definition(definition, externals)
         resolved_externals = GTScriptParser.resolve_external_symbols(
             definition._gtscript_["nonlocals"], definition._gtscript_["imported"], externals
         )
