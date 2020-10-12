@@ -32,6 +32,7 @@ from .passes import (
     InitInfoPass,
     MergeBlocksPass,
     NormalizeBlocksPass,
+    ReduceTemporaryStoragesPass,
 )
 
 
@@ -119,6 +120,11 @@ class IRTransformer:
         # into local scalars
         demote_local_temporaries_to_variables_pass = DemoteLocalTemporariesToVariablesPass()
         demote_local_temporaries_to_variables_pass.apply(self.transform_data)
+
+        # turn temporary fields that are only written and read within the horizontal plane
+        # into 2D i-j fields
+        reduce_temporary_storages_pass = ReduceTemporaryStoragesPass()
+        reduce_temporary_storages_pass.apply(self.transform_data)
 
         # prune some stages that don't have effect
         housekeeping_pass = HousekeepingPass()

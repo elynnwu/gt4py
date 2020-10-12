@@ -60,6 +60,7 @@ class NumPySourceGenerator(PythonSourceGenerator):
         self.interval_k_start_name = interval_k_start_name
         self.interval_k_end_name = interval_k_end_name
         self.conditions_depth = 0
+        self.range_args = []
 
     def _make_field_origin(self, name: str, origin=None):
         if origin is None:
@@ -88,13 +89,17 @@ class NumPySourceGenerator(PythonSourceGenerator):
             range_args = [loop_bounds[1] + " -1", loop_bounds[0] + " -1", "-1"]
 
         if iteration_order != gt_ir.IterationOrder.PARALLEL:
-            range_expr = "range({args})".format(args=", ".join(a for a in range_args))
-            seq_axis = self.impl_node.domain.sequential_axis.name
-            source_lines.append(
-                "for {ax} in {range_expr}:".format(ax=seq_axis, range_expr=range_expr)
-            )
+            if self.range_args != range_args:
+                self.range_args = range_args
+                range_expr = "range({args})".format(args=", ".join(a for a in range_args))
+                seq_axis = self.impl_node.domain.sequential_axis.name
+                source_lines.append(
+                    "for {ax} in {range_expr}:".format(ax=seq_axis, range_expr=range_expr)
+                )
             source_lines.extend(" " * self.indent_size + line for line in body_sources)
         else:
+            # Clear range args on parallel intervals
+            self.range_args.clear()
             source_lines.append(
                 "{interval_k_start_name} = {lb}".format(
                     interval_k_start_name=self.interval_k_start_name, lb=loop_bounds[0]
@@ -110,9 +115,13 @@ class NumPySourceGenerator(PythonSourceGenerator):
         return source_lines
 
     def make_temporary_field(
-        self, name: str, dtype: gt_ir.DataType, extent: gt_definitions.Extent
-    ) -> List[str]:
-        source_lines = super().make_temporary_field(name, dtype, extent)
+        self,
+        name: str,
+        dtype: gt_ir.DataType,
+        extent: gt_definitions.Extent,
+        axes: list = gt_definitions.CartesianSpace.names,
+    ):
+        source_lines = super().make_temporary_field(name, dtype, extent, axes)
         source_lines.extend(self._make_field_origin(name, extent.to_boundary().lower_indices))
 
         return source_lines
@@ -187,28 +196,31 @@ class NumPySourceGenerator(PythonSourceGenerator):
             index.append(" : ".join(bounds))
 
         k_ax = self.domain.sequential_axis.name
-        k_offset = node.offset.get(k_ax, 0)
-        if is_parallel:
-            start_expr = self.interval_k_start_name
-            start_expr += " {:+d}".format(k_offset) if k_offset else ""
-            end_expr = self.interval_k_end_name
-            end_expr += " {:+d}".format(k_offset) if k_offset else ""
-            index.append(
-                "{name}{marker}[2] + {start}:{name}{marker}[2] + {stop}".format(
-                    name=node.name, start=start_expr, marker=self.origin_marker, stop=end_expr
+        if k_ax in node.offset:
+            k_offset = node.offset.get(k_ax, 0)
+            if is_parallel:
+                start_expr = self.interval_k_start_name
+                start_expr += " {:+d}".format(k_offset) if k_offset else ""
+                end_expr = self.interval_k_end_name
+                end_expr += " {:+d}".format(k_offset) if k_offset else ""
+                index.append(
+                    "{name}{marker}[2] + {start}:{name}{marker}[2] + {stop}".format(
+                        name=node.name, start=start_expr, marker=self.origin_marker, stop=end_expr
+                    )
                 )
-            )
+            else:
+                idx = "{:+d}".format(k_offset) if k_offset else ""
+                index.append(
+                    "{name}{marker}[{d}] + {ax}{idx}".format(
+                        name=node.name,
+                        marker=self.origin_marker,
+                        d=len(self.domain.parallel_axes),
+                        ax=k_ax,
+                        idx=idx,
+                    )
+                )
         else:
-            idx = "{:+d}".format(k_offset) if k_offset else ""
-            index.append(
-                "{name}{marker}[{d}] + {ax}{idx}".format(
-                    name=node.name,
-                    marker=self.origin_marker,
-                    d=len(self.domain.parallel_axes),
-                    ax=k_ax,
-                    idx=idx,
-                )
-            )
+            index.append("0")
 
         source = "{name}[{index}]".format(name=node.name, index=", ".join(index))
 
