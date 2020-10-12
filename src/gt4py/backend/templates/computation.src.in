@@ -45,6 +45,7 @@
             ]
         }
     }
+    - stage_extents: { str: str }
     - stencil_unique_name: str
     - tmp_fields: [{ "name": str, "dtype": str }]
 #}
@@ -278,7 +279,7 @@ void run(const std::array<gt::uint_t, 3>& domain,
         {%- for stage in step %}
             {%- filter indent(width=extra_indent) %}
             {{- stage_comma() }}
-            gt::make_stage<{{ stage }}_func>(
+            gt::make_stage_with_extent<{{ stage }}_func, gt::extent<{{ stage_extents[stage] }}>>(
                 {%- set arg_comma = joiner(",") -%}
                 {%- for arg in stage_functors[stage].args|map(attribute="name") %}{{ arg_comma() }} p_{{ arg }}(){%- endfor %}
                 {%- for arg in splitters %}{{ arg_comma() }} p_{{ arg }}(){%- endfor %}
