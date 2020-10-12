@@ -1,0 +1,358 @@
+{#
+
+ # GT4Py - GridTools4Py - GridTools for Python
+ #
+ # Copyright (c) 2014-2019, ETH Zurich
+ # All rights reserved.
+ #
+ # This file is part the GT4Py project and the GridTools framework.
+ # GT4Py is free software: you can redistribute it and/or modify it under
+ # the terms of the GNU General Public License as published by the
+ # Free Software Foundation, either version 3 of the License, or any later
+ # version. See the LICENSE.txt file at the top-level directory of this
+ # distribution for a copy of the license or check <https://www.gnu.org/licenses/>.
+ #
+ # SPDX-License-Identifier: GPL-3.0-or-later
+
+ ---- Template variables ----
+
+    - arg_fields: [{ "name": str, "dtype": str, "axes": str, "layout_id": int }]
+    - constants: { name:str : str }
+    - gt_backend: str
+    - halo_sizes: [int]
+    - max_ndim: int
+    - multi_stages: [{ "name": str, "exec": str, "interval": [{ "level": str, "offset": int }], "steps": [{
+            "stage_name": str,
+            "args": [
+                {
+                    "name": str
+                    "access_type": str
+                    "extent": [int] | None
+                }
+            ],
+            "regions": [
+                {
+                    "interval_start": (level:int, offset:int),
+                    "interval_end": (level:int, offset:int),
+                    "body": str
+                }
+            ],
+            "extents": [int]
+        }]}]
+    - parameters: [{ "name": str, "dtype": str }]
+    - stencil_unique_name: str
+    - tmp_fields: [{ "name": str, "dtype": str, "axes": str }]
+    - access_vars: [{ "name": str, "expr": str, "itype": str, "stages": [str] }]
+    - block_sizes: [int]
+    - max_extents: [int]
+    - max_threads: int
+    - extra_threads: int
+    - do_k_parallel: bool
+    - debug: bool
+    - profile: bool
+#}
+
+#include "computation.hpp"
+
+namespace {{ stencil_unique_name }} {
+
+namespace {
+
+static constexpr uint_t ndim = {{ max_ndim }};
+
+{% if constants -%}
+// Constants
+{%- endif %}
+{% for name, value in constants.items() %}
+static constexpr auto {{ name }} = {{ value }};
+{%- endfor %}
+
+template <typename DataType = float64_t> struct data_store_t {
+    std::array<uint_t, ndim> shape;
+    std::array<uint_t, ndim> strides;
+    DataType* ptr;
+};
+
+template<typename DataType>
+data_store_t<DataType> make_data_store(const BufferInfo& bi,
+                                       const std::array<uint_t, ndim>& domain,
+                                       const std::array<uint_t, ndim>& origin) {
+    // ptr, dims and strides are "outer domain" (i.e., compute domain + halo
+    // region). The halo region is only defined through `make_grid` (and
+    // currently, in the storage info)
+    std::array<uint_t, ndim> dims{};
+    std::array<uint_t, ndim> strides{};
+    DataType* ptr = static_cast<DataType*>(bi.ptr);
+    for (uint_t i = 0; i < ndim; ++i) {
+        strides[i] = bi.strides[i] / sizeof(DataType);
+        dims[i] = domain[i] + 2 * origin[i];
+    }
+    return data_store_t<DataType>{dims, strides, ptr};
+}
+
+{% if tmp_fields -%}
+template<typename DataType>
+data_store_t<DataType> make_temp_store(const std::array<uint_t, ndim>& domain,
+                                       const std::array<uint_t, ndim>& origin,
+                                       const std::string& axes) {
+    // Compute dims, strides, and size
+    const std::string all_axes = "ijk";
+    std::array<uint_t, ndim> dims = {1, 1, 1};
+    std::array<uint_t, ndim> strides = {1, 1, 1};
+    uint_t size = 1;
+
+    for(int i = ndim - 1; i >= 0; --i) {
+      if(axes.find(all_axes[i]) != std::string::npos)
+          dims[i] = domain[i] + 2 * origin[i];
+      strides[i] = size;
+      size *= dims[i];
+    }
+
+    // Allocate pointer
+{%- if "cuda" in gt_backend %}
+    DataType* ptr;
+    cudaMalloc((void**) &ptr, size * sizeof(DataType));
+    // std::reverse(std::begin(strides), std::end(strides));
+{%- else %}
+    DataType* ptr = new DataType[size];
+{%- endif %}
+
+    return data_store_t<DataType>{dims, strides, ptr};
+}
+
+template<typename DataType>
+void free_temp_store(data_store_t<DataType>& temp) {
+{%- if "cuda" in gt_backend %}
+    cudaFree(temp.ptr);
+{%- else %}
+    delete[] temp.ptr;
+{%- endif %}
+    temp.ptr = nullptr;
+}
+{%- endif %}
+}  // namespace
+
+{% if "cuda" in gt_backend -%}
+__constant__ uint_t data_strides[{{ max_ndim }}];
+{% if tmp_fields -%}
+__constant__ uint_t temp_strides[{{ max_ndim }}];
+{%- endif %}
+{% for multi in multi_stages %}
+__global__ void __launch_bounds__({{ max_threads }}) {{ multi.name }}_kernel(
+    const int i_min, const int i_max,
+    const int j_min, const int j_max,
+    const int k_min, const int k_max,
+{%- set comma = joiner(", ") %}
+{%- for field in arg_fields -%}
+    {{- comma() }}
+    {{ field.dtype }}* const {{ field.name }}
+{%- endfor -%}
+{%- for field in tmp_fields -%}
+    {{- comma() }}
+    {{ field.dtype }}* const {{ field.name }}
+{%- endfor -%}
+{%- for param in parameters -%}
+    {{- comma() }}
+    const {{ param.dtype }} {{ param.name }}
+{%- endfor -%}
+) {
+    int i_block = blockDim.x * blockIdx.x + threadIdx.x;
+    int j_block = blockDim.y * blockIdx.y + threadIdx.y;
+    int k_block = blockDim.z * blockIdx.z + threadIdx.z;
+    int i_inc = gridDim.x * blockDim.x;
+    int j_inc = gridDim.y * blockDim.y;
+    int k_inc = gridDim.z * blockDim.z;
+
+    {%- for access in access_vars %}
+        {{ access.itype }} {{ access.name }} = 0;
+    {%- endfor %}
+
+    int i, j, k;
+{%- for step in multi.steps %}
+    // {{ step.stage_name }}
+    {%- if multi.exec == "backward" %}
+    for (k = k_{{ multi.interval[1].level }} + {{ multi.interval[1].offset }} + {{ step.extents[5] }} + k_block; k >= k_{{ multi.interval[0].level }} + {{ multi.interval[0].offset }} + {{ step.extents[4] }}; k -= k_inc) {
+    {%- else %}
+    for (k = k_{{ multi.interval[0].level }} + {{ multi.interval[0].offset }} + {{ step.extents[4] }} + k_block; k <= k_{{ multi.interval[1].level }} + {{ multi.interval[1].offset }} + {{ step.extents[5] }}; k += k_inc) {
+    {%- endif %}
+      {%- for region in step.regions %}
+      for (i = i_min + {{ step.extents[0] }} + i_block; i <= i_max + {{ step.extents[1] }}; i += i_inc) {
+        for (j = j_min + {{ step.extents[2] }} + j_block; j <= j_max + {{ step.extents[3] }}; j += j_inc) {
+        {%- for access in access_vars %}
+          {%- if step.stage_name in access.stages %}
+          {{ access.name }} = {{ access.expr }};
+          {%- endif -%}
+        {%- endfor %}
+          {{ region.body }}
+        }
+      }
+      {%- endfor %}
+    }
+    {# %- if multi.steps|length > 1 % #}
+    {%- if not loop.last %}
+    __syncthreads();
+    {%- endif -%}
+{%- endfor %}
+}
+{% endfor %}
+{% endif -%}
+
+// Run actual computation
+void run(const std::array<uint_t, ndim>& domain,
+{%- set comma = joiner(", ") %}
+{%- for field in arg_fields -%}
+         {{- comma() }}
+         const BufferInfo& bi_{{ field.name }} {{- comma() -}} const std::array<uint_t, ndim>& {{ field.name }}_origin
+{%- endfor %}
+{%- for param in parameters %}
+         {{- comma() }}
+         {{ param.dtype }} {{ param.name }}
+{%- endfor %}) {
+    // Compute min origin
+    std::array<uint_t, ndim> min_origin = {{ arg_fields[0].name }}_origin;
+
+    // Initialize data stores from input buffers
+{%- for field in arg_fields %}
+    auto {{ field.name }}_ds = make_data_store<{{ field.dtype }}>(bi_{{ field.name }}, domain, {{ field.name }}_origin);
+{%- endfor %}
+
+{% if tmp_fields -%}
+    // Allocate temporary storages
+{%- for field in tmp_fields %}
+    auto {{ field.name }}_ds = make_temp_store<{{ field.dtype }}>(domain, min_origin, "{{ field.axes }}");
+{%- endfor %}
+{%- endif %}
+    const int i_min = min_origin[0];
+    const int i_max = domain[0] + i_min - 1;
+    const int j_min = min_origin[1];
+    const int j_max = domain[1] + j_min - 1;
+    const int k_min = min_origin[2];
+    const int k_max = domain[2] + k_min - 1;
+{%- if debug %}
+    printf("DEBUG: origin = (%d,%d,%d)\n", {{ arg_fields[0].name }}_origin[0], {{ arg_fields[0].name }}_origin[1], {{ arg_fields[0].name }}_origin[2]);
+    printf("DEBUG: (i_min,i_max,j_min,j_max,k_min,k_max) = (%d,%d,%d,%d,%d,%d)\n", i_min, i_max, j_min, j_max, k_min, k_max);
+{%- endif %}
+{%- for field in arg_fields %}
+    {{ field.dtype }}* {{ field.name }} = {{ field.name }}_ds.ptr;
+{%- endfor %}
+{% if tmp_fields -%}
+{%- for field in tmp_fields %}
+    {{ field.dtype }}* {{ field.name }} = {{ field.name }}_ds.ptr;
+{%- endfor -%}
+{%- endif -%}
+
+{# --- CUDA --- #}
+{%- if "cuda" in gt_backend %}
+{%- if profile -%}
+cudaProfilerStart();
+{%- endif -%}
+
+{% for multi in multi_stages %}
+    {
+    const uint_t i_size = i_max - i_min + 1;
+    const uint_t j_size = j_max - j_min + 1;
+    const uint_t k_size = k_max - k_min + 1;
+
+    const uint_t i_block_size = (i_size + {{ block_sizes[0] }} - 1) / {{ block_sizes[0] }};
+    const uint_t j_block_size = ((j_size + {{ block_sizes[1] }}  - 1) / {{ block_sizes[1] }}) * 2 + 1;
+    {%- if do_k_parallel %}
+    const uint_t k_block_size = ((domain[2] + {{ block_sizes[2] }} - 1) / {{ block_sizes[2] }}) / 4;
+    {%- else %}
+    const uint_t k_block_size = 1;
+    {%- endif %}
+
+    dim3 gdim(i_block_size, j_block_size, k_block_size);
+    dim3 bdim({{ block_sizes[0] }}, {{ block_sizes[1] }} + {{ extra_threads }}, 1);
+    {%- if debug %}
+    printf("DEBUG: gdim = (%d,%d,%d)\n", i_block_size, j_block_size, k_block_size);
+    printf("DEBUG: bdim = (%d,%d,%d)\n", {{ block_sizes[0] }}, {{ block_sizes[1] }} + {{ extra_threads }}, 1);
+    {%- endif %}
+    cudaMemcpyToSymbol(data_strides, {{ arg_fields[0].name }}_ds.strides.data(), sizeof(uint_t) * ndim);
+    {%- if debug %}
+    printf("DEBUG: data_strides = (%d,%d,%d)\n", {{ arg_fields[0].name }}_ds.strides[0], {{ arg_fields[0].name }}_ds.strides[1], {{ arg_fields[0].name }}_ds.strides[2]);
+    {%- endif %}
+    {%- if tmp_fields %}
+    cudaMemcpyToSymbol(temp_strides, {{ tmp_fields[0].name }}_ds.strides.data(), sizeof(uint_t) * ndim);
+    {%- if debug %}
+    printf("DEBUG: temp_strides = (%d,%d,%d)\n", {{ tmp_fields[0].name }}_ds.strides[0], {{ tmp_fields[0].name }}_ds.strides[1], {{ tmp_fields[0].name }}_ds.strides[2]);
+    {%- endif %}
+    {%- endif %}
+
+    {{ multi.name }}_kernel<<<gdim, bdim>>>(
+    i_min, i_max,
+    j_min, j_max,
+    k_min, k_max,
+    {%- set comma = joiner(", ") %}
+    {%- set extra_indent=4 %}
+    {%- for field in arg_fields -%}
+    {{- comma() }}
+    {{ field.name }}
+    {%- endfor %}
+    {%- for field in tmp_fields %}
+    {{- comma() }}
+    {{ field.name }}
+    {%- endfor %}
+    {%- for param in parameters %}
+    {{- comma() }}
+    {{ param.name }}
+    {%- endfor %});
+    {%- set extra_indent=0 %}
+    }
+{% endfor %}
+{%- if profile -%}
+cudaProfilerStop();
+{%- endif -%}
+{# --- C++ --- #}
+{%- else %}
+    const auto data_strides = {{ arg_fields[0].name }}_ds.strides;
+{%- if debug %}
+    printf("DEBUG: data_strides = (%d,%d,%d)\n", data_strides[0], data_strides[1], data_strides[2]);
+{%- endif %}
+{%- if tmp_fields %}
+    const auto temp_strides = {{ tmp_fields[0].name }}_ds.strides;
+{%- if debug %}
+    printf("DEBUG: temp_strides = (%d,%d,%d)\n", temp_strides[0], temp_strides[1], temp_strides[2]);
+{%- endif %}
+{%- endif %}
+{%- for access in access_vars %}
+    {{ access.itype }} {{ access.name }} = 0;
+{%- endfor %}
+{% for multi in multi_stages %}
+    // {{ multi.name }}
+{%- if multi.exec == "parallel" %}
+    #pragma omp parallel for schedule(runtime)
+{%- endif %}
+{%- if multi.exec == "backward" %}
+    for (int k = k_{{ multi.interval[1].level }} + {{ multi.interval[1].offset }} + {{ multi.steps[0].extents[5] }}; k >= k_{{ multi.interval[0].level }} + {{ multi.interval[0].offset }} + {{ multi.steps[0].extents[4] }}; --k) {
+{%- else %}
+    for (int k = k_{{ multi.interval[0].level }} + {{ multi.interval[0].offset }} + {{ multi.steps[0].extents[4] }}; k <= k_{{ multi.interval[1].level }} + {{ multi.interval[1].offset }} + {{ multi.steps[0].extents[5] }}; ++k) {
+{%- endif %}
+{%- for step in multi.steps %}
+      // {{ step.stage_name }}:
+    {%- for region in step.regions %}
+      for (int i = i_min + {{ step.extents[0] }}; i <= i_max + {{ step.extents[1] }}; ++i) {
+        #pragma omp simd
+        for (int j = j_min + {{ step.extents[2] }}; j <= j_max + {{ step.extents[3] }}; ++j) {
+        {%- for access in access_vars %}
+          {%- if step.stage_name in access.stages %}
+            {{ access.name }} = {{ access.expr }};
+          {%- endif -%}
+{%- endfor %}
+          {{ region.body }}
+        }
+      }
+    {%- endfor %}
+{%- endfor %}
+    }
+{% endfor %}
+{%- endif %}
+
+{%- if tmp_fields -%}
+    // Free temporary storages
+{%- for field in tmp_fields %}
+    free_temp_store<{{ field.dtype }}>({{ field.name }}_ds);
+{%- endfor %}
+{%- endif %}
+
+}  // run
+}  // namespace {{ stencil_unique_name }}

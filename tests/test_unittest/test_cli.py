@@ -72,6 +72,8 @@ BACKEND_ROW_PATTERN_BY_NAME = {
     "gtx86": r"^\s*gtx86\s*c\+\+\s*python\s*Yes",
     "gtmc": r"^\s*gtmc\s*c\+\+\s*python\s*Yes",
     "gtcuda": r"^\s*gtcuda\s*cuda\s*python\s*Yes",
+    "cxxopt": r"^\s*gtmc\s*c\+\+\s*python\s*Yes",
+    "cuda": r"^\s*gtcuda\s*cuda\s*python\s*Yes",
     "dawn:gtx86": r"^\s*dawn:gtx86\s*c\+\+\s*python\s*No",
     "dawn:gtmc": r"^\s*dawn:gtmc\s*c\+\+\s*python\s*No",
     "dawn:gtcuda": r"^\s*dawn:gtcuda\s*cuda\s*python\s*No",

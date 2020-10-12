@@ -324,3 +324,10 @@ class StencilObject(abc.ABC):
 
         if exec_info is not None:
             exec_info["call_run_end_time"] = time.perf_counter()
+            run_time = (exec_info["run_end_time"] - exec_info["run_start_time"]) * 1e3
+            call_time = (exec_info["call_run_end_time"] - exec_info["call_run_start_time"]) * 1e3
+            stencil_name = str(type(self)).split(".")[-1].rstrip("'>")
+            with open("./profile.csv", "a+") as file:
+                file.write(
+                    "%s,%s,%.18f,%.18f\n" % (stencil_name, self.backend, run_time, call_time)
+                )
