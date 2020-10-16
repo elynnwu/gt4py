@@ -161,6 +161,10 @@ class Storage(np.ndarray):
         return obj
 
     @property
+    def array(self):
+        return self.data
+
+    @property
     def backend(self):
         return self._backend
 
@@ -289,6 +293,10 @@ class GPUStorage(Storage):
         res.gpu_view[...] = self.gpu_view
         cp.cuda.Device(0).synchronize()
         return res
+
+    @property
+    def array(self):
+        return self._raw_buffer
 
     @property
     def gpu_view(self):
