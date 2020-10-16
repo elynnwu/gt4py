@@ -16,7 +16,7 @@
 
  ---- Template variables ----
 
-    - arg_fields: [{ "name": str, "dtype": str, "layout_id": int }]
+    - arg_fields: [{ "name": str, "dtype": str, "axes": str, "layout_id": int }]
     - constants: { name:str : str }
     - gt_backend: str
     - halo_sizes: [int]
@@ -47,7 +47,8 @@
     }
     - stage_extents: { str: str }
     - stencil_unique_name: str
-    - tmp_fields: [{ "name": str, "dtype": str }]
+    - tmp_fields: [{ "name": str, "dtype": str, "axes": str }]
+    - used_axes: [{ "name": str, "selector": str }]
 #}
 
 {%- if gt_backend == "cuda" %}
@@ -85,15 +86,30 @@ static constexpr gt::uint_t halo_size_j = {{ halo_sizes[1] }};
 static constexpr gt::uint_t halo_size_k = {{ halo_sizes[2] }};
 
 // Storage definitions
+{%- for axes in used_axes %}
 template <int Id>
+{%- if axes.name == "ijk" %}
 using storage_info_t =
     gt::storage_traits<backend_t>::storage_info_t<
         Id, 3,
+{%- else %}
+using storage_info_{{ axes.name }}_t =
+    gt::storage_traits<backend_t>::special_storage_info_t<
+        Id, gt::selector<{{ axes.selector }}>,
+{%- endif %}
         gt::halo<0, 0, 0 /* not used */>>;
+{%- endfor %}
 
+{%- for axes in used_axes %}
 template<typename T, int Id>
+{%- if axes.name == "ijk" %}
 using data_store_t =
     gt::storage_traits<backend_t>::data_store_t<T, storage_info_t<Id>>;
+{%- else %}
+using data_store_{{ axes.name }}_t =
+    gt::storage_traits<backend_t>::data_store_t<T, storage_info_{{ axes.name }}_t<Id>>;
+{%- endif %}
+{%- endfor %}
 
 // Placeholder definitions
 {% set arg_counter = 0 -%}
@@ -107,7 +123,11 @@ using p_{{ param.name }} = gt::arg<{{ arg_counter + loop.index0 }}, gt::global_p
 {% set arg_counter = arg_counter + parameters|length %}
 {% if tmp_fields -%}
 {%- for field in tmp_fields %}
+{%- if field.axes == "ijk" %}
 using p_{{ field.name }} = gt::tmp_arg<{{ arg_counter + loop.index0 }}, data_store_t<{{ field.dtype }}, 0>>;
+{%- else %}
+using p_{{ field.name }} = gt::tmp_arg<{{ arg_counter + loop.index0 }}, data_store_{{ field.axes }}_t<{{ field.dtype }}, 0>>;
+{%- endif %}
 {%- endfor %}
 {% set arg_counter = arg_counter + tmp_fields|length %}
 {%- endif %}
@@ -115,7 +135,6 @@ using p_{{ field.name }} = gt::tmp_arg<{{ arg_counter + loop.index0 }}, data_sto
 // Computation
 using computation_t =
     gt::computation<p_{{ (arg_fields|list + parameters|list)|map(attribute='name')|join(", p_")}}>;
-
 
 // Constants
 {% for name, value in constants.items() %}

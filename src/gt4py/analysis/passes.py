@@ -1264,6 +1264,95 @@ class DemoteLocalTemporariesToVariablesPass(TransformPass):
         return transform_data
 
 
+class ReduceTemporaryStoragesPass(TransformPass):
+    class StorageReducer(gt_ir.IRNodeMapper):
+        def __init__(self):
+            self.iir = None
+            self.interval = None
+            self.iteration_order = None
+            self.full_fields = set()
+            self.reduced_fields = dict()
+            self.fields_extents = dict()
+
+        def __call__(self, node: gt_ir.StencilImplementation) -> gt_ir.StencilImplementation:
+            assert isinstance(node, gt_ir.StencilImplementation)
+            result = self.visit(node)
+            self._reduce_fields()
+            return result
+
+        def _reduce_fields(self):
+            for field_name in self.reduced_fields:
+                field_decl = self.iir.fields[field_name]
+                field_decl.axes.pop()
+                for node in self.reduced_fields[field_name]["nodes"]:
+                    new_offset = {axis: node.offset[axis] for axis in field_decl.axes}
+                    node.offset = new_offset
+
+        def visit_StencilImplementation(
+            self, path: tuple, node_name: str, node: gt_ir.StencilImplementation
+        ) -> gt_ir.StencilImplementation:
+            self.iir = node
+            self.fields_extents = node.fields_extents.copy()
+            return self.generic_visit(path, node_name, node)
+
+        def visit_MultiStage(
+            self, path: tuple, node_name: str, node: gt_ir.MultiStage
+        ) -> Tuple[bool, Optional[gt_ir.MultiStage]]:
+            self.iteration_order = node.iteration_order
+            self.generic_visit(path, node_name, node)
+            return True, node
+
+        def visit_ApplyBlock(
+            self, path: tuple, node_name: str, node: gt_ir.ApplyBlock
+        ) -> Tuple[bool, gt_ir.ApplyBlock]:
+            self.interval = node.interval
+            self.generic_visit(path, node_name, node)
+            return True, node
+
+        def visit_FieldAccessor(
+            self, path: tuple, node_name: str, node: gt_ir.FieldAccessor
+        ) -> Tuple[bool, Optional[gt_ir.FieldAccessor]]:
+            self.fields_extents[node.symbol] |= node.extent
+            return True, node
+
+        def visit_FieldRef(
+            self, path: tuple, node_name: str, node: gt_ir.FieldRef
+        ) -> Tuple[bool, gt_ir.FieldRef]:
+            field_name = node.name
+            is_full_field = False
+            if field_name in self.iir.temporary_fields:
+                if self.iteration_order == gt_ir.IterationOrder.PARALLEL:
+                    is_full_field = True
+
+                elif field_name not in self.full_fields:
+                    extent = self.fields_extents[field_name]
+                    ndims = extent.ndims - 1
+                    if extent.lower_indices[ndims] == 0 and extent.upper_indices[ndims] == 0:
+                        if field_name not in self.reduced_fields:
+                            self.reduced_fields[field_name] = dict(
+                                interval=self.interval,
+                                nodes=list(),
+                            )
+                        elif self.interval != self.reduced_fields[field_name]["interval"]:
+                            is_full_field = True
+                    else:
+                        is_full_field = True
+
+                if field_name in self.reduced_fields:
+                    if is_full_field:
+                        self.full_fields.add(field_name)
+                        del self.reduced_fields[field_name]
+                    else:
+                        self.reduced_fields[field_name]["nodes"].append(node)
+
+            return True, node
+
+    def apply(self, transform_data: TransformData) -> TransformData:
+        storage_reducer = self.StorageReducer()
+        transform_data.implementation_ir = storage_reducer(transform_data.implementation_ir)
+        return transform_data
+
+
 class HousekeepingPass(TransformPass):
     class WarnIfNoEffect(gt_ir.IRNodeVisitor):
         def __call__(self, stencil_name: str, node: gt_ir.StencilImplementation) -> None:
@@ -1274,10 +1363,7 @@ class HousekeepingPass(TransformPass):
         def visit_StencilImplementation(self, node: gt_ir.StencilImplementation):
             # Emit warning if stencil has no effect, i.e. does not read or write to any api fields
             if not node.has_effect:
-                warnings.warn(
-                    f"Stencil `{self.stencil_name}` has no effect.",
-                    RuntimeWarning,
-                )
+                warnings.warn(f"Stencil `{self.stencil_name}` has no effect.", RuntimeWarning)
 
     class PruneEmptyNodes(gt_ir.IRNodeMapper):
         def __call__(self, node: gt_ir.StencilImplementation) -> None:
