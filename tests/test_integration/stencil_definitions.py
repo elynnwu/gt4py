@@ -256,3 +256,10 @@ def parallel_regions(in_storage: Field3D, out_storage: Field3D):
             out_storage = in_storage[-1, 0, 0]
         with interval(1, None):
             out_storage = in_storage[1, 0, 0]
+
+
+@register
+def write_after_read(field: Field3D):
+    with computation(PARALLEL), interval(...):
+        tmp = field
+        field = tmp[-1, 0, 0]
