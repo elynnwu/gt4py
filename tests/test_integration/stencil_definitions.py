@@ -263,3 +263,16 @@ def write_after_read(field: Field3D):
     with computation(PARALLEL), interval(...):
         tmp = field
         field = tmp[-1, 0, 0]
+
+
+@register
+def local_var_inside_nested_conditional(in_storage: Field3D, out_storage: Field3D):
+    with computation(PARALLEL), interval(...):
+        mid_storage = 2
+        if in_storage[0, 0, 0] > 0:
+            local_var = 4
+            if local_var + in_storage < out_storage:
+                mid_storage = 3
+            else:
+                mid_storage = 4
+            out_storage[0, 0, 0] = local_var + mid_storage
