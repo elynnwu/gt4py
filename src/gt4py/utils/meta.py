@@ -24,6 +24,7 @@ import copy
 import inspect
 import operator
 import textwrap
+from typing import Union
 
 from .base import shashed_id
 
@@ -244,6 +245,32 @@ class ASTTransformPass(ASTPass):
         return node
 
 
+class FullNameCreator(ast.NodeVisitor):
+    """Return the full name as str from an ast.Attribute or ast.Name"""
+
+    @classmethod
+    def run(cls, node: Union[ast.Attribute, ast.Name]) -> str:
+        instance = cls()
+        instance(node)
+        return ".".join(instance._name_parts)
+
+    def __init__(self):
+        self._name_parts = []
+
+    def __call__(self, node: ast.AST):
+        self.visit(node)
+
+    def visit_Name(self, node: ast.Name):
+        self._name_parts.append(node.id)
+
+    def visit_Attribute(self, node: ast.Attribute):
+        self.visit(node.value)
+        self._name_parts.append(node.attr)
+
+
+get_full_name = FullNameCreator.run
+
+
 class ASTEvaluator(ASTPass):
     AST_OP_TO_OP = {
         # Arithmetic operations
@@ -302,14 +329,14 @@ class ASTEvaluator(ASTPass):
     def visit_Tuple(self, node: ast.Tuple):
         return tuple(self.visit(elem) for elem in node.elts)
 
-    def visit_UnaryOp(self, node):
+    def visit_UnaryOp(self, node: ast.UnaryOp):
         val = self.visit(node.operand)
         return self.AST_OP_TO_OP[type(node.op)](val)
 
-    def visit_BinOp(self, node):
+    def visit_BinOp(self, node: ast.BinOp):
         return self.AST_OP_TO_OP[type(node.op)](self.visit(node.left), self.visit(node.right))
 
-    def visit_BoolOp(self, node):
+    def visit_BoolOp(self, node: ast.BoolOp):
         # Use short-circuited evaluation of logical expressions
         condition = True if isinstance(node.op, ast.And) else False
         for value in node.values:
@@ -318,7 +345,10 @@ class ASTEvaluator(ASTPass):
 
         return condition
 
-    def visit_Compare(self, node):
+    def visit_Attribute(self, node: ast.Attribute):
+        return self.context[get_full_name(node)]
+
+    def visit_Compare(self, node: ast.Compare):
         values = [self.visit(node.left)] + [self.visit(cmp) for cmp in node.comparators]
         comparisons = [
             self.AST_OP_TO_OP[type(op)](values[i], values[i + 1]) for i, op in enumerate(node.ops)
