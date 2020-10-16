@@ -627,7 +627,7 @@ class BaseGTBackend(gt_backend.BasePyExtBackend, gt_backend.CLIBackendMixin):
             clean=self.builder.options.backend_opts.get("clean", False),
             **pyext_builder.get_gt_pyext_build_opts(
                 debug_mode=self.builder.options.backend_opts.get("debug_mode", False),
-                add_profile_info=self.builder.options.backend_opts.get("add_profile_info", False),
+                add_profile_info=self.builder.options.backend_opts.get("add_profile_info", True),
                 uses_cuda=uses_cuda,
             ),
         )
@@ -711,7 +711,7 @@ class GTCUDAPyModuleGenerator(gt_backend.CUDAPyExtModuleGenerator):
         output_field_names = [
             name
             for name, info in self.args_data["field_info"].items()
-            if info.access == gt_definitions.AccessKind.READ_WRITE
+            if info and info.access == gt_definitions.AccessKind.READ_WRITE
         ]
 
         return "\n".join([f + "._set_device_modified()" for f in output_field_names])

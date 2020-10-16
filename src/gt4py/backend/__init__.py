@@ -33,4 +33,9 @@ try:
 except ImportError:
     pass  # dawn4py not installed
 
+try:
+    from .new_backends import *
+except ImportError:
+    pass  # new_backends not installed
+
 from . import python_generator
