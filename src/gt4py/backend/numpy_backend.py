@@ -130,7 +130,14 @@ class NumPySourceGenerator(PythonSourceGenerator):
         source_lines = []
 
         # Computations body is split in different vertical regions
-        assert sorted(regions, reverse=iteration_order == gt_ir.IterationOrder.BACKWARD) == regions
+        assert (
+            sorted(
+                regions,
+                reverse=iteration_order == gt_ir.IterationOrder.BACKWARD,
+                key=lambda tup: tup[0],
+            )
+            == regions
+        )
 
         for bounds, body in regions:
             region_lines = self._make_regional_computation(iteration_order, bounds, body)
@@ -144,29 +151,50 @@ class NumPySourceGenerator(PythonSourceGenerator):
 
         is_parallel = self.block_info.iteration_order == gt_ir.IterationOrder.PARALLEL
         extent = self.block_info.extent
-        lower_extent = list(extent.lower_indices)
-        upper_extent = list(extent.upper_indices)
-
-        for d, ax in enumerate(node.offset.keys()):
-            idx = node.offset.get(ax, 0)
-            if idx:
-                lower_extent[d] += idx
-                upper_extent[d] += idx
 
         index = []
-        for d in range(2):
-            start_expr = " {:+d}".format(lower_extent[d]) if lower_extent[d] != 0 else ""
-            size_expr = "{dom}[{d}]".format(dom=self.domain_arg_name, d=d)
-            size_expr += " {:+d}".format(upper_extent[d]) if upper_extent[d] != 0 else ""
-            index.append(
-                "{name}{marker}[{d}]{start}: {name}{marker}[{d}] + {size}".format(
-                    name=node.name,
-                    start=start_expr,
-                    marker=self.origin_marker,
-                    d=d,
-                    size=size_expr,
-                )
-            )
+        for d, axis_name in enumerate([axis.name for axis in self.impl_node.domain.parallel_axes]):
+
+            lower_extent = extent.lower_indices[d]
+            upper_extent = extent.upper_indices[d]
+            offset = node.offset.get(axis_name, 0)
+            extent_and_offset = (lower_extent + offset, upper_extent + offset)
+
+            origin = f"{node.name}{self.origin_marker}[{d}]"
+            regular_bounds = [
+                f"{extent_and_offset[0]}",
+                f"{self.domain_arg_name}[{d}]"
+                + (f"{extent_and_offset[1]:+d}" if extent_and_offset[1] != 0 else ""),
+            ]
+
+            bounds = []
+            if self.block_info.parallel_interval:
+                axis_interval = self.block_info.parallel_interval[d]
+
+                # Loop over endpoints of the axis
+                for axis_bound, regular_bound in zip(
+                    (axis_interval.start, axis_interval.end), regular_bounds
+                ):
+                    relative_offset = (
+                        "0"
+                        if axis_bound.level == gt_ir.LevelMarker.START
+                        else f"{self.domain_arg_name}[{d}]"
+                    )
+                    if not axis_bound.extend:
+                        bounds.append(f"{relative_offset}{axis_bound.offset:+d}{offset:+d}")
+                    else:
+                        bounds.append(regular_bound)
+
+                # Add correction
+                bounds = [
+                    f"{origin} + min({regular_bounds[1]}, max({bound}, {regular_bounds[0]}))"
+                    for bound in bounds
+                ]
+
+            else:
+                bounds = [f"{origin} + {rb}" for rb in regular_bounds]
+
+            index.append(" : ".join(bounds))
 
         k_ax = self.domain.sequential_axis.name
         if k_ax in node.offset:

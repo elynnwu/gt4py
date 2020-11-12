@@ -71,6 +71,8 @@ builtins = {
     "externals",
     "computation",
     "interval",
+    "parallel",
+    "region",
     "__gtscript__",
     "__externals__",
     "__INLINED",
@@ -490,6 +492,21 @@ def computation(order):
 def interval(*args):
     """Define the interval of computation in the 'K' sequential axis."""
     pass
+
+
+def parallel(*args):
+    """Define a block of code that is restricted to a set of regions in the parallel axes."""
+    pass
+
+
+class _Region:
+    def __getitem__(self, *args):
+        """Define a region in the parallel axes."""
+        pass
+
+
+# Horizontal regions
+region = _Region()
 
 
 def __INLINED(compile_if_expression):
