@@ -260,3 +260,9 @@ def local_var_inside_nested_conditional(in_storage: Field3D, out_storage: Field3
             else:
                 mid_storage = 4
             out_storage[0, 0, 0] = local_var + mid_storage
+
+@register
+def write_after_read(field: Field3D):
+    with computation(PARALLEL), interval(...):
+        tmp = field
+        field = tmp[-1, 0, 0]

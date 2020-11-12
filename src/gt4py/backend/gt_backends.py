@@ -511,12 +511,20 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
         ]
 
         requires_positional = False
+        stage_extents = {}
         stage_functors = {}
         for multi_stage in node.multi_stages:
             for group in multi_stage.groups:
                 for stage in group.stages:
                     if stage.parallel_interval is not None:
                         requires_positional = True
+                    compute_extent = stage.compute_extent
+                    extents: List[int] = []
+                    for i in range(compute_extent.ndims - 1):
+                        extents.extend(
+                            (compute_extent.lower_indices[i], compute_extent.upper_indices[i])
+                        )
+                    stage_extents[stage.name] = ", ".join([str(extent) for extent in extents])
                     stage_functors[stage.name] = self.visit(stage)
 
         multi_stages = []
@@ -535,6 +543,7 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
             multi_stages=multi_stages,
             parameters=parameters,
             stage_functors=stage_functors,
+            stage_extents=stage_extents,
             stencil_unique_name=self.class_name,
             tmp_fields=tmp_fields,
             used_axes=used_axes.values(),
@@ -709,7 +718,7 @@ class GTCUDAPyModuleGenerator(gt_backend.CUDAPyExtModuleGenerator):
         output_field_names = [
             name
             for name, info in self.args_data["field_info"].items()
-            if info.access == gt_definitions.AccessKind.READ_WRITE
+            if info and info.access == gt_definitions.AccessKind.READ_WRITE
         ]
 
         return "\n".join([f + "._set_device_modified()" for f in output_field_names])
