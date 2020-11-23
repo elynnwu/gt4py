@@ -1278,6 +1278,78 @@ class DemoteLocalTemporariesToVariablesPass(TransformPass):
         cls.DemoteSymbols.apply(transform_data.implementation_ir, demotables)
 
 
+class ReduceTemporaryStoragesPass(TransformPass):
+    class ReducibleFieldsCollector(gt_ir.IRNodeVisitor):
+        def __call__(self, node: gt_ir.StencilImplementation) -> Set[str]:
+            assert isinstance(node, gt_ir.StencilImplementation)
+            self.interval: gt_ir.AxisInterval = None
+            self.iteration_order: gt_ir.IterationOrder = None
+            self.reduced_fields: Dict[str, gt_ir.AxisInterval] = {
+                temp_field: None for temp_field in node.temporary_fields
+            }
+            self.visit(node)
+            return set(self.reduced_fields.keys())
+
+        def visit_MultiStage(self, node: gt_ir.MultiStage) -> None:
+            self.iteration_order = node.iteration_order
+            self.generic_visit(node)
+
+        def visit_ApplyBlock(self, node: gt_ir.ApplyBlock) -> None:
+            self.interval = node.interval
+            self.generic_visit(node)
+
+        def visit_FieldRef(self, node: gt_ir.FieldRef) -> None:
+            field_name = node.name
+            if field_name in self.reduced_fields:
+                if self.iteration_order == gt_ir.IterationOrder.PARALLEL:
+                    self.reduced_fields.pop(field_name)
+                else:
+                    offsets: List[int] = list(node.offset.values())
+                    if offsets[-1] != 0:
+                        self.reduced_fields.pop(field_name)
+                    else:
+                        interval = self.reduced_fields[field_name]
+                        if interval is not None and interval != self.interval:
+                            self.reduced_fields.pop(field_name)
+                        else:
+                            self.reduced_fields[field_name] = self.interval
+
+    class StorageReducer(gt_ir.IRNodeMapper):
+        def __init__(self, reduced_fields: Set[str]):
+            self.reduced_fields = reduced_fields
+
+        def __call__(self, node: gt_ir.StencilImplementation) -> gt_ir.StencilImplementation:
+            assert isinstance(node, gt_ir.StencilImplementation)
+            return self.visit(node)
+
+        def visit_StencilImplementation(
+            self, path: tuple, node_name: str, node: gt_ir.StencilImplementation
+        ) -> gt_ir.StencilImplementation:
+            self.iir = node
+            for field_name in self.reduced_fields:
+                assert field_name in node.temporary_fields, "Tried to reduce API field to 2D."
+                field_decl = node.fields[field_name]
+                field_decl.axes.pop()
+            return self.generic_visit(path, node_name, node)
+
+        def visit_FieldRef(
+            self, path: tuple, node_name: str, node: gt_ir.FieldRef
+        ) -> Tuple[bool, Union[gt_ir.FieldRef, gt_ir.VarRef]]:
+            if node.name in self.reduced_fields:
+                field_decl = self.iir.fields[node.name]
+                node.offset = {axis: node.offset[axis] for axis in field_decl.axes}
+            return True, node
+
+    def apply(self, transform_data: TransformData) -> TransformData:
+        reducible_fields_collector = self.ReducibleFieldsCollector()
+        reduced_fields = reducible_fields_collector(transform_data.implementation_ir)
+
+        storage_reducer = self.StorageReducer(reduced_fields)
+        transform_data.implementation_ir = storage_reducer(transform_data.implementation_ir)
+
+        return transform_data
+
+
 class HousekeepingPass(TransformPass):
     class WarnIfNoEffect(gt_ir.IRNodeVisitor):
         """Warn if StencilImplementation has no effect."""
@@ -1298,10 +1370,7 @@ class HousekeepingPass(TransformPass):
         def visit_StencilImplementation(self, node: gt_ir.StencilImplementation):
             # Emit warning if stencil has no effect, i.e. does not read or write to any api fields
             if not node.has_effect:
-                warnings.warn(
-                    f"Stencil `{self.stencil_name}` has no effect.",
-                    RuntimeWarning,
-                )
+                warnings.warn(f"Stencil `{self.stencil_name}` has no effect.", RuntimeWarning)
 
     class PruneEmptyNodes(gt_ir.IRNodeMapper):
         """Removes empty multi-stages, stage groups, and stages."""

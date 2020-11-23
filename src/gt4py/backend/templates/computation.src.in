@@ -16,7 +16,7 @@
 
  ---- Template variables ----
 
-    - arg_fields: [{ "name": str, "dtype": str, "layout_id": int }]
+    - arg_fields: [{ "name": str, "dtype": str, "axes": str, "layout_id": int }]
     - constants: { name:str : str }
     - gt_backend: str
     - halo_sizes: [int]
@@ -43,7 +43,8 @@
         }
     }
     - stencil_unique_name: str
-    - tmp_fields: [{ "name": str, "dtype": str }]
+    - tmp_fields: [{ "name": str, "dtype": str, "axes": str }]
+    - used_axes: [{ "name": str, "selector": str }]
 #}
 
 {%- if gt_backend == "cuda" %}
@@ -72,8 +73,8 @@ using backend_t = gt::backend::{{ gt_backend }};
 static constexpr gt::uint_t level_offset_limit = {{ k_axis.offset_limit }};
 
 using axis_t =
-    gridtools::axis<{{ k_axis.n_intervals }}, /* NIntervals */
-                    gt::axis_config::offset_limit<level_offset_limit>>;
+    gt::axis<{{ k_axis.n_intervals }}, /* NIntervals */
+             gt::axis_config::offset_limit<level_offset_limit>>;
 
 // These halo sizes are used to determine the sizes of the temporaries
 static constexpr gt::uint_t halo_size_i = {{ halo_sizes[0] }};
@@ -81,29 +82,52 @@ static constexpr gt::uint_t halo_size_j = {{ halo_sizes[1] }};
 static constexpr gt::uint_t halo_size_k = {{ halo_sizes[2] }};
 
 // Storage definitions
+{%- for axes in used_axes %}
 template <int Id>
+{%- if axes.name == "ijk" %}
 using storage_info_t =
     gt::storage_traits<backend_t>::storage_info_t<
         Id, 3,
+{%- else %}
+using storage_info_{{ axes.name }}_t =
+    gt::storage_traits<backend_t>::special_storage_info_t<
+        Id, gt::selector<{{ axes.selector }}>,
+{%- endif %}
         gt::halo<0, 0, 0 /* not used */>>;
+{%- endfor %}
 
+{%- for axes in used_axes %}
 template<typename T, int Id>
+{%- if axes.name == "ijk" %}
 using data_store_t =
     gt::storage_traits<backend_t>::data_store_t<T, storage_info_t<Id>>;
+{%- else %}
+using data_store_{{ axes.name }}_t =
+    gt::storage_traits<backend_t>::data_store_t<T, storage_info_{{ axes.name }}_t<Id>>;
+{%- endif %}
+{%- endfor %}
 
 // Placeholder definitions
 {% set arg_counter = 0 -%}
 {%- for field in arg_fields %}
+{%- if field.axes == "ijk" %}
 using p_{{ field.name }} = gt::arg<{{ arg_counter + loop.index0 }}, data_store_t<{{ field.dtype }}, {{ field.layout_id }}>>;
+{%- else %}
+using p_{{ field.name }} = gt::arg<{{ arg_counter + loop.index0 }}, data_store_{{ field.axes }}_t<{{ field.dtype }}, {{ field.layout_id }}>>;
+{%- endif %}
 {%- endfor %}
 {% set arg_counter = arg_counter + arg_fields|length %}
 {% for param in parameters %}
-using p_{{ param.name }} = gt::arg<{{ arg_counter + loop.index0 }}, gt::global_parameter<{{ param.dtype }}>>;
+using p_{{ param.name }} = gt::arg<{{ arg_counter + loop.index0 }}, gt::global_parameter<backend_t, {{ param.dtype }}>>;
 {%- endfor %}
 {% set arg_counter = arg_counter + parameters|length %}
 {% if tmp_fields -%}
 {%- for field in tmp_fields %}
+{%- if field.axes == "ijk" %}
 using p_{{ field.name }} = gt::tmp_arg<{{ arg_counter + loop.index0 }}, data_store_t<{{ field.dtype }}, 0>>;
+{%- else %}
+using p_{{ field.name }} = gt::tmp_arg<{{ arg_counter + loop.index0 }}, data_store_{{ field.axes }}_t<{{ field.dtype }}, 0>>;
+{%- endif %}
 {%- endfor %}
 {% set arg_counter = arg_counter + tmp_fields|length %}
 {%- endif %}
@@ -111,7 +135,6 @@ using p_{{ field.name }} = gt::tmp_arg<{{ arg_counter + loop.index0 }}, data_sto
 // Computation
 using computation_t =
     gt::computation<p_{{ (arg_fields|list + parameters|list)|map(attribute='name')|join(", p_")}}>;
-
 
 // Constants
 {% for name, value in constants.items() %}
@@ -160,11 +183,12 @@ auto make_grid(const std::array<gt::uint_t, 3>& compute_domain_shape) {
 }
 
 
+{%- for axes in used_axes %}
+{%- if axes.name == "ijk" %}
 template<typename T, int Id>
 data_store_t<T, Id> make_data_store(const BufferInfo& bi,
                                     const std::array<gt::uint_t, 3>& compute_domain_shape,
-                                    const std::array<gt::uint_t, 3>& origin)
-{
+                                    const std::array<gt::uint_t, 3>& origin) {
     if (bi.ndim != 3) {
         throw std::runtime_error("Wrong number of dimensions [" +
                                  std::to_string(bi.ndim) +
@@ -189,9 +213,35 @@ data_store_t<T, Id> make_data_store(const BufferInfo& bi,
                            gt::ownership::external_cpu};
 {%- endif %}
 }
+{%- else %}
+template<typename T, int Id>
+data_store_{{ axes.name }}_t<T, Id> make_data_store_{{ axes.name }}(const BufferInfo& bi,
+                                       const std::array<gt::uint_t, 3>& compute_domain_shape,
+                                       const std::array<gt::uint_t, 3>& origin) {
+    if (bi.ndim != 3) {
+        throw std::runtime_error("Wrong number of dimensions [" +
+                                 std::to_string(bi.ndim) +
+                                 " != " + std::to_string(3) + "]");
+    }
+    gt::array<gt::uint_t, 3> dims{};
+    gt::array<gt::uint_t, 3> strides{};
+    T* ptr = static_cast<T*>(bi.ptr);
+    for (int i = 0; i < 3; ++i) {
+        strides[i] = bi.strides[i] / sizeof(T);
+        ptr += strides[i] * origin[i];
+        dims[i] = compute_domain_shape[i]+2*origin[i];
+    }
+    return data_store_{{ axes.name }}_t<T, Id>{storage_info_{{ axes.name }}_t<Id>{dims, strides}, ptr,
+{%- if gt_backend == "cuda" %}
+                              gt::ownership::external_gpu};
+{%- else %}
+                              gt::ownership::external_cpu};
+{%- endif %}
+}
+{%- endif %}
+{%- endfor %}
 
 }  // namespace
-
 
 {% if parameters -%}
 // Global parameters
@@ -232,7 +282,11 @@ void run(const std::array<gt::uint_t, 3>& domain,
 #}
     // Initialize data stores from input buffers
 {%- for field in arg_fields %}
+{%- if field.axes == "ijk" %}
     auto ds_{{ field.name }} = make_data_store<{{ field.dtype }}, {{ field.layout_id }}>(bi_{{ field.name }}, domain, {{ field.name }}_origin);
+{%- else %}
+    auto ds_{{ field.name }} = make_data_store_{{ field.axes }}<{{ field.dtype }}, {{ field.layout_id }}>(bi_{{ field.name }}, domain, {{ field.name }}_origin);
+{%- endif %}
 {%- endfor %}
 
     // Update global parameters
