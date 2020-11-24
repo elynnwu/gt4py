@@ -43,6 +43,7 @@
     - access_vars: [{ "name": str, "expr": str, "itype": str, "stages": [str] }]
     - block_sizes: [int]
     - max_extents: [int]
+    - multi_stage_graph: { str: [str] }
     - max_threads: int
     - extra_threads: int
     - do_k_parallel: bool
@@ -277,9 +278,35 @@ void run(const std::array<uint_t, ndim>& domain,
     cudaProfilerStart();
 {%- endif -%}
 
+{%- if multi_stage_graph -%}
+    // Define CUDA graph
+    cudaGraph_t graph;
+    cudaStream_t stream;
+    cudaGraphExec_t instance;
+
+    cudaGraphCreate(&graph);
+    cudaStreamCreate(&stream);
+    {%- for node, children in multi_stage_graph.items() %}
+    cudaGraphAddNode(graph, {{ node }}_kernel, {
+    {%- for child in children -%}
+        {{ child }}_kernel
+        {%- if not loop.last %}
+        {{- comma() }}
+        {%- endif %}
+    {%- endfor %}
+    }, ...);
+    {%- endfor %}
+
+    // Instantiate graph and apply optimizations
+    cudaGraphInstantiate(&instance, graph);
+
+    // Launch executable graph
+    cudaGraphLaunch(instance, stream);
+    cudaStreamSynchronize(stream);
+{%- endif -%}
+
 {% for multi in multi_stages %}
     {
-
     {% if profile %}
     PUSH_RANGE("Stencil: {{ stencil_unique_name.split('___')[0] }}, Multi_stage: {{ multi.name }}",1)
     {% endif %}

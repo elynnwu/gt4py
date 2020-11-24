@@ -26,46 +26,41 @@ from gt4py import utils as gt_utils
 
 class MultiStageGraphCreator(gt_ir.IRNodeVisitor):
     def __call__(self, node: gt_ir.StencilImplementation) -> None:
+        self.name: str = ""
         self.graph: Dict[str, Set[str]] = dict()
-        self.iir: gt_ir.StencilImplementation = node
-        self.multistage_names: List[str] = []
-        self.multistage_fields: Dict[str, int] = {}
+        self.reads: Dict[str, Set[str]] = dict()
+        self.writes: Dict[str, Set[str]] = dict()
         self.visit(node)
         return self.graph
 
-    def _add_edge(self, source_node: str, dest_node: str) -> None:
-        if source_node not in self.graph:
-            self.graph[source_node] = set()
-        self.graph[source_node].add(dest_node)
+    def _add_edge(self, graph: Dict[str, Set[str]], source_node: str, dest_node: str) -> None:
+        if source_node not in graph:
+            graph[source_node] = set()
+        graph[source_node].add(dest_node)
 
     def visit_MultiStage(self, node: gt_ir.MultiStage) -> None:
-        self.multistage_names.append(node.name)
-        self.multistage_fields.clear()
+        self.name = node.name
+        self.graph[self.name] = set()
+        self.reads.clear()
         self.generic_visit(node)
 
+        for field_name in self.reads:
+            if field_name in self.writes:
+                for multistage in self.writes[field_name]:
+                    if multistage != self.name:
+                        self._add_edge(self.graph, self.name, multistage)
+
     def visit_FieldRef(self, node: gt_ir.FieldRef, **kwargs: Any) -> None:
-        field_name = node.name
-        if field_name not in self.iir.temporary_fields:
-            if field_name not in self.multistage_fields:
-                self.multistage_fields[field_name] = 0  # AccessKind.READ_ONLY
-            if "write_field" not in kwargs or kwargs["write_field"] == "":
-                self.multistage_fields[field_name] = 1  # AccessKind.READ_WRITE
+        if "write_field" not in kwargs or kwargs["write_field"] == "":
+            self._add_edge(self.writes, node.name, self.name)
+        else:
+            self._add_edge(self.reads, node.name, self.name)
 
     def visit_Assign(self, node: gt_ir.Assign, **kwargs: Any) -> None:
         kwargs["write_field"] = ""
         self.visit(node.target, **kwargs)
         kwargs["write_field"] = node.target.name
         self.visit(node.value, **kwargs)
-
-        multistage_name = self.multistage_names[-1]
-        target_name = node.target.name
-        if target_name in self.multistage_fields and self.multistage_fields[target_name] == 1:
-            self._add_edge(multistage_name, target_name)
-            self.multistage_fields[target_name] = -1  # Mark as added...
-
-        for field_name in self.multistage_fields:
-            if self.multistage_fields[field_name] == 0:  # AccessKind.READ_ONLY
-                self._add_edge(field_name, multistage_name)
 
 
 class OptExtGenerator(gt_backend.GTPyExtGenerator):
@@ -232,8 +227,8 @@ class OptExtGenerator(gt_backend.GTPyExtGenerator):
     def visit_StencilImplementation(self, node: gt_ir.StencilImplementation):
         # Build multistage dataflow graph...
         graph_creator = MultiStageGraphCreator()
-        graph = graph_creator(node)
-        print(graph)
+        multi_stage_graph = graph_creator(node)
+        # print(multi_stage_graph)
 
         max_extent = functools.reduce(
             lambda a, b: a | b, node.fields_extents.values(), gt_definitions.Extent.zeros()
@@ -317,6 +312,7 @@ class OptExtGenerator(gt_backend.GTPyExtGenerator):
             tmp_fields=tmp_fields,
             max_ndim=max_ndim,
             access_vars=list(self.access_map_.values()),
+            multi_stage_graph=multi_stage_graph,
             block_sizes=block_sizes,
             max_extents=max_extents,
             max_threads=max_threads,
