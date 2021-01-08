@@ -21,11 +21,10 @@ from typing import Any, Dict, List, Set, Tuple
 from gt4py import backend as gt_backend
 from gt4py import definitions as gt_definitions
 from gt4py import ir as gt_ir
-from gt4py import utils as gt_utils
 
 
 class MultiStageGraphCreator(gt_ir.IRNodeVisitor):
-    def __call__(self, node: gt_ir.StencilImplementation) -> None:
+    def __call__(self, node: gt_ir.StencilImplementation) -> Dict[str, Set[str]]:
         self.name: str = ""
         self.graph: Dict[str, Set[str]] = dict()
         self.reads: Dict[str, Set[str]] = dict()
