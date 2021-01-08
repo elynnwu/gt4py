@@ -72,7 +72,7 @@ class OptExtGenerator(gt_backend.GTPyExtGenerator):
     }
     COMPUTATION_FILES = ["computation.hpp", "computation.src"]
     BINDINGS_FILES = ["bindings.cpp"]
-    BLOCK_SIZES = (32, 8, 1)
+    BLOCK_SIZES = (256, 1, 1)
     ITERATORS = [iter.lower() for iter in gt_definitions.CartesianSpace.names]
 
     def __init__(self, class_name, module_name, gt_backend_t, options):
@@ -82,7 +82,7 @@ class OptExtGenerator(gt_backend.GTPyExtGenerator):
         self.curr_stage_: str = ""
         self.last_interval_: List[Dict[str, int]] = list()
         self.fuse_k_loops_: bool = "cuda" not in self.gt_backend_t
-        self.splitters_: Tuple[str] = None
+        self.splitters_: Tuple[str, ...] = ()
 
     def _compute_max_threads(self, block_sizes: tuple, max_extent: gt_definitions.Extent):
         max_threads = 0
@@ -110,7 +110,11 @@ class OptExtGenerator(gt_backend.GTPyExtGenerator):
 
     def _format_conditional(self, entry_conditional):
         for iterator in self.ITERATORS:
-            entry_conditional = entry_conditional.replace(f"eval.{iterator}()", iterator)
+            entry_conditional = (
+                entry_conditional.replace(f"eval.{iterator}()", f"{iterator} - {iterator}_min")
+                .replace(f"domain_size_{iterator.upper()}()", f"domain_size_{iterator}")
+                .replace("<gt::int_t>", "<int>")
+            )
         for splitter in self.splitters_:
             entry_conditional = entry_conditional.replace(f"{splitter}()", splitter)
         entry_conditional = entry_conditional.replace("eval", "")
@@ -175,7 +179,7 @@ class OptExtGenerator(gt_backend.GTPyExtGenerator):
         self.curr_stage_ = node.name
         stage_data = super().visit_Stage(node)
         stage_data["name"] = node.name
-        stage_data["extents"]: List[int] = []
+        stage_data["extents"] = []
 
         compute_extent = node.compute_extent
         for i in range(compute_extent.ndims):
@@ -210,7 +214,7 @@ class OptExtGenerator(gt_backend.GTPyExtGenerator):
             entry_conditional = (
                 region["entry_conditional"] if "entry_conditional" in region else ""
             )
-            if len(entry_conditional) > 0:
+            if entry_conditional:
                 entry_conditional = self._format_conditional(entry_conditional)
 
             sub_stage["body"] = region["body"]
@@ -233,8 +237,8 @@ class OptExtGenerator(gt_backend.GTPyExtGenerator):
         max_extent = functools.reduce(
             lambda a, b: a | b, node.fields_extents.values(), gt_definitions.Extent.zeros()
         )
-        halo_sizes: Tuple[int] = tuple(
-            max(lower, upper) for lower, upper in max_extent.to_boundary()
+        halo_sizes: Tuple[int, ...] = tuple(
+            int(max(lower, upper)) for lower, upper in max_extent.to_boundary()
         )
         constants: Dict[str, str] = {}
         if node.externals:
@@ -243,10 +247,10 @@ class OptExtGenerator(gt_backend.GTPyExtGenerator):
                 if value is not None:
                     constants[name] = value
 
-        arg_fields: List[any] = []
-        tmp_fields: List[str] = []
+        arg_fields: List[Any] = []
+        tmp_fields: List[Dict[str, Any]] = []
         storage_ids: List[int] = []
-        block_sizes: List[int] = self.BLOCK_SIZES
+        block_sizes: Tuple[int, int, int] = self.BLOCK_SIZES
 
         max_ndim: int = 0
         for name, field_decl in node.fields.items():
@@ -271,12 +275,6 @@ class OptExtGenerator(gt_backend.GTPyExtGenerator):
             for name, parameter in node.parameters.items()
             if name not in node.unreferenced
         ]
-
-        self.splitters_ = (
-            tuple(splitter.name for splitter in gt_utils.flatten_iter(node.splitters))
-            if hasattr(node, "splitters")
-            else ()
-        )
 
         multi_stages: List[Dict[str, Any]] = list()
         for multi_stage in node.multi_stages:

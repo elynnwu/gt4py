@@ -164,6 +164,7 @@ __global__ void __launch_bounds__({{ max_threads }}) {{ multi.name }}_kernel(
     const int i_min, const int i_max,
     const int j_min, const int j_max,
     const int k_min, const int k_max,
+    const unsigned domain_size_i, const unsigned domain_size_j,
 {%- set comma = joiner(", ") %}
 {%- for field in arg_fields -%}
     {{- comma() }}
@@ -192,13 +193,13 @@ __global__ void __launch_bounds__({{ max_threads }}) {{ multi.name }}_kernel(
     int i, j, k;
 {%- for stage in multi.stages %}
     // {{ stage.name }}
-    {%- if multi.exec == "backward" %}
-    for (k = k_{{ stage.interval[1].level }} + {{ stage.interval[1].offset }} + {{ stage.extents[5] }} + k_block; k >= k_{{ stage.interval[0].level }} + {{ stage.interval[0].offset }} + {{ stage.extents[4] }}; k -= k_inc) {
-    {%- else %}
-    for (k = k_{{ stage.interval[0].level }} + {{ stage.interval[0].offset }} + {{ stage.extents[4] }} + k_block; k <= k_{{ stage.interval[1].level }} + {{ stage.interval[1].offset }} + {{ stage.extents[5] }}; k += k_inc) {
-    {%- endif %}
-      for (i = i_min + {{ stage.extents[0] }} + i_block; i <= i_max + {{ stage.extents[1] }}; i += i_inc) {
-        for (j = j_min + {{ stage.extents[2] }} + j_block; j <= j_max + {{ stage.extents[3] }}; j += j_inc) {
+    for (i = i_min + {{ stage.extents[0] }} + i_block; i <= i_max + {{ stage.extents[1] }}; i += i_inc) {
+      for (j = j_min + {{ stage.extents[2] }} + j_block; j <= j_max + {{ stage.extents[3] }}; j += j_inc) {
+        {%- if multi.exec == "backward" %}
+        for (k = k_{{ stage.interval[1].level }} + {{ stage.interval[1].offset }} + {{ stage.extents[5] }} + k_block; k >= k_{{ stage.interval[0].level }} + {{ stage.interval[0].offset }} + {{ stage.extents[4] }}; k -= k_inc) {
+        {%- else %}
+        for (k = k_{{ stage.interval[0].level }} + {{ stage.interval[0].offset }} + {{ stage.extents[4] }} + k_block; k <= k_{{ stage.interval[1].level }} + {{ stage.interval[1].offset }} + {{ stage.extents[5] }}; k += k_inc) {
+        {%- endif %}
         {%- for access in access_vars %}
           {%- if stage.name in access.stages %}
           {{ access.name }} = {{ access.expr }};
@@ -253,6 +254,7 @@ void run(const std::array<uint_t, ndim>& domain,
     const int j_max = domain[1] + j_min - 1;
     const int k_min = min_origin[2];
     const int k_max = domain[2] + k_min - 1;
+
 {%- for splitter in splitters -%}
     {{ splitter }} += {{ splitter[0] + "_min" }};
 {%- endfor -%}
@@ -343,6 +345,7 @@ void run(const std::array<uint_t, ndim>& domain,
     i_min, i_max,
     j_min, j_max,
     k_min, k_max,
+    domain[0], domain[1],
     {%- set comma = joiner(", ") %}
     {%- set extra_indent=4 %}
     {%- for field in arg_fields -%}
@@ -382,6 +385,8 @@ void run(const std::array<uint_t, ndim>& domain,
     printf("DEBUG: temp_strides = (%d,%d,%d)\n", temp_strides[0], temp_strides[1], temp_strides[2]);
 {%- endif %}
 {%- endif %}
+    const unsigned domain_size_i = domain[0];
+    const unsigned domain_size_j = domain[1];
 {%- for access in access_vars %}
     {{ access.itype }} {{ access.name }} = 0;
 {%- endfor %}
