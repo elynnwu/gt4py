@@ -194,6 +194,45 @@ class NumPySourceGenerator(PythonSourceGenerator):
 
         return source_lines
 
+    @staticmethod
+    def _compute_overlap(
+        axis_interval: gt_ir.AxisInterval, axis_extents: Tuple[int, int]
+    ) -> gt_ir.AxisInterval:
+        """Return the part of the axis iterated over."""
+        # TODO Ensure the AxisInterval overlaps?
+        if axis_interval.start.level == gt_ir.LevelMarker.START:
+            offset = (
+                max(axis_interval.start.offset, axis_extents[0])
+                if not axis_interval.start.extend
+                else axis_extents[0]
+            )
+            start_bound = gt_ir.AxisBound(
+                level=gt_ir.LevelMarker.START,
+                offset=offset,
+            )
+        else:
+            if axis_interval.start.extend:
+                raise ValueError("Logic error. Cannot extend here.")
+            start_bound = gt_ir.AxisBound(
+                level=gt_ir.LevelMarker.END, offset=axis_interval.start.offset
+            )
+
+        if axis_interval.end.level == gt_ir.LevelMarker.END:
+            offset = (
+                min(axis_interval.end.offset, axis_extents[1])
+                if not axis_interval.end.extend
+                else axis_extents[1]
+            )
+            end_bound = gt_ir.AxisBound(level=gt_ir.LevelMarker.END, offset=offset)
+        else:
+            if axis_interval.end.extend:
+                raise ValueError("Logic error. Cannot extend here.")
+            end_bound = gt_ir.AxisBound(
+                level=gt_ir.LevelMarker.START, offset=axis_interval.end.offset
+            )
+
+        return gt_ir.AxisInterval(start=start_bound, end=end_bound)
+
     # ---- Visitor handlers ----
     def visit_ShapedExpr(self, node: ShapedExpr) -> str:
         is_parallel = self.block_info.iteration_order == gt_ir.IterationOrder.PARALLEL
@@ -219,35 +258,44 @@ class NumPySourceGenerator(PythonSourceGenerator):
         assert node.name in self.block_info.accessors
 
         is_parallel = self.block_info.iteration_order == gt_ir.IterationOrder.PARALLEL
-        extent = self.block_info.extent
-        lower_extent = list(extent.lower_indices)
-        upper_extent = list(extent.upper_indices)
         parallel_axes_dims = [
             self.impl_node.domain.index(axis)
             for axis in self.impl_node.fields[node.name].axes
             if axis != self.domain.sequential_axis.name
         ]
 
-        for d, ax in enumerate(self.domain.axes_names):
-            idx = node.offset.get(ax, 0)
-            if idx:
-                lower_extent[d] += idx
-                upper_extent[d] += idx
-
         index = []
         for fd, d in enumerate(parallel_axes_dims):
-            start_expr = " {:+d}".format(lower_extent[d]) if lower_extent[d] != 0 else ""
-            size_expr = "{dom}[{d}]".format(dom=self.domain_arg_name, d=d)
-            size_expr += " {:+d}".format(upper_extent[d]) if upper_extent[d] != 0 else ""
-            index.append(
-                "{name}{marker}[{fd}]{start}: {name}{marker}[{fd}] + {size}".format(
-                    name=node.name,
-                    start=start_expr,
-                    marker=self.origin_marker,
-                    fd=fd,
-                    size=size_expr,
+            ax = self.domain.axes_names[d]
+            ax_offset = node.offset.get(ax, 0)
+
+            axis_extents = self.block_info.extent[d]
+
+            if self.block_info.parallel_interval:
+                axis_interval = type(self)._compute_overlap(
+                    self.block_info.parallel_interval[d], axis_extents
                 )
-            )
+            else:
+                axis_interval = gt_ir.AxisInterval(
+                    start=gt_ir.AxisBound(
+                        level=gt_ir.LevelMarker.START, offset=axis_extents[0]
+                    ),
+                    end=gt_ir.AxisBound(level=gt_ir.LevelMarker.END, offset=axis_extents[1]),
+                )
+
+            origin_expr = f"{node.name}{self.origin_marker}[{fd}]"
+            level_to_expr = {
+                gt_ir.LevelMarker.START: origin_expr,
+                gt_ir.LevelMarker.END: f"{origin_expr} + {self.domain_arg_name}[{fd}]",
+            }
+
+            indices = []
+            for bound in (axis_interval.start, axis_interval.end):
+                total_offset = bound.offset + ax_offset
+                total_offset_expr = " {:+d}".format(total_offset) if total_offset != 0 else ""
+                indices.append(f"{level_to_expr[bound.level]}{total_offset_expr}")
+
+            index.append(f"{indices[0]} : {indices[1]}")
 
         k_ax = self.domain.sequential_axis.name
         if k_ax in self.impl_node.fields[node.name].axes:

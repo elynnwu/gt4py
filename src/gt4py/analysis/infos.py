@@ -19,6 +19,8 @@
 
 import abc
 
+import numpy as np
+
 from gt4py import ir as gt_ir
 from gt4py import utils as gt_utils
 from gt4py.definitions import BuildOptions, CartesianSpace, Extent, NumericTuple
@@ -67,7 +69,7 @@ class IntervalInfo:
     """`AttribClass` class representing an AxisInterval definition.
 
     Interval specification: (start_level, start_offset), (end_level, end_offset)
-    End is not included
+    End is not included.
 
     Parameters
     ----------
@@ -79,6 +81,8 @@ class IntervalInfo:
 
     start = attribute(of=TupleOf[int, int])
     end = attribute(of=TupleOf[int, int])
+
+    MAX_INT = np.iinfo(np.int32).max
 
     def as_tuple(self, k_interval_sizes: list) -> NumericTuple:
         start = sum(k_interval_sizes[: self.start[0]]) + self.start[1]
@@ -143,7 +147,7 @@ class IntervalBlockInfo:
     ----------
     id : `int`
         Unique identifier.
-    intervals : IntervalInfo`
+    interval : `IntervalInfo`
         Sequential-axis interval to which this block is applied.
     stmts : `list` [`StatementInfo`]
         List of operations.
@@ -178,10 +182,13 @@ class IJBlockInfo:
         Outputs from this block (with zero extent).
     compute_extent : `gt4py.definitions.Extent`
         Compute extent for this block.
+    parallel_interval : `list` [`IntervalInfo`]
+        A region of the parallel axes to which this block is applied.
     """
 
     id = attribute(of=int)
     intervals = attribute(of=SetOf[IntervalInfo])
+    parallel_interval = attribute(of=ListOf[IntervalInfo], optional=True)
     interval_blocks = attribute(of=ListOf[IntervalBlockInfo], factory=list)
     inputs = attribute(of=DictOf[str, Extent], factory=dict)
     outputs = attribute(of=SetOf[str], factory=set)

@@ -398,6 +398,21 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
 
         return (start_splitter, start_offset), (end_splitter, end_offset)
 
+    def _parallel_interval_condition(self, parallel_interval: List[gt_ir.AxisInterval]) -> str:
+        defs = []
+        for interval, axis_name in zip(parallel_interval, self.impl_node.domain.par_axes_names):
+            index = f"eval.{axis_name.lower()}()"
+            for axis_bound, oper in zip((interval.start, interval.end), (">=", "<")):
+                if not axis_bound.extend:
+                    relative_offset = (
+                        "0"
+                        if axis_bound.level == gt_ir.LevelMarker.START
+                        else f"static_cast<gt::int_t>(eval(domain_size_{axis_name.upper()}()))"
+                    )
+                    defs.append(f"{index} {oper} {relative_offset}{axis_bound.offset:+d}")
+
+        return " && ".join(defs)
+
     def visit_ApplyBlock(
         self, node: gt_ir.ApplyBlock
     ) -> Tuple[Tuple[Tuple[int, int], Tuple[int, int]], str]:
@@ -430,6 +445,17 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
                 arg["extent"] = gt_utils.flatten(accessor.extent)
             args.append(arg)
 
+        if node.parallel_interval:
+            conditional = self._parallel_interval_condition(node.parallel_interval)
+            args.extend(
+                [
+                    {"name": f"domain_size_{name}", "access_type": "in", "extent": None}
+                    for name in self.domain.axes_names
+                ]
+            )
+        else:
+            conditional = ""
+
         # Create regions and computations
         regions = []
         for apply_block in node.apply_blocks:
@@ -438,11 +464,12 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
                 {
                     "interval_start": interval_definition[0],
                     "interval_end": interval_definition[1],
+                    "entry_conditional": conditional,
                     "body": body_sources,
                 }
             )
-        functor_content = {"args": args, "regions": regions}
 
+        functor_content = {"args": args, "regions": regions}
         return functor_content
 
     def visit_StencilImplementation(
@@ -491,6 +518,7 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
         ]
 
         stage_extents = {}
+        requires_positional = False
         stage_functors = {}
         for multi_stage in node.multi_stages:
             for group in multi_stage.groups:
@@ -502,6 +530,8 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
                             (compute_extent.lower_indices[i], compute_extent.upper_indices[i])
                         )
                     stage_extents[stage.name] = ", ".join([str(extent) for extent in extents])
+                    if stage.parallel_interval is not None:
+                        requires_positional = True
                     stage_functors[stage.name] = self.visit(stage)
 
         multi_stages = []
@@ -516,6 +546,7 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
             halo_sizes=halo_sizes,
             k_axis=k_axis,
             module_name=self.module_name,
+            requires_positional=requires_positional,
             multi_stages=multi_stages,
             parameters=parameters,
             stage_functors=stage_functors,
