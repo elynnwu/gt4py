@@ -7,6 +7,7 @@ import numpy as np
 
 import gt4py.backend as gt_backend
 import gt4py.storage as gt_storage
+import gt4py.utils as gt_utils
 from gt4py.definitions import (
     AccessKind,
     Boundary,
@@ -116,6 +117,10 @@ class StencilObject(abc.ABC):
     def __call__(self, *args, **kwargs):
         pass
 
+    @staticmethod
+    def _get_field_mask(field):
+        return getattr(field, "mask", [True] * len(field.shape))
+
     def _get_max_domain(self, field_args, origin):
         """Return the maximum domain size possible
 
@@ -132,11 +137,13 @@ class StencilObject(abc.ABC):
         -------
             `Shape`: the maximum domain size.
         """
-        max_domain = Shape([np.iinfo(np.uintc).max] * self.domain_info.ndims)
-        shapes = {name: Shape(field.shape) for name, field in field_args.items()}
-        for name, shape in shapes.items():
-            upper_boundary = Index(self.field_info[name].boundary.upper_indices)
-            max_domain &= shape - (Index(origin[name]) + upper_boundary)
+        large_val = np.iinfo(np.uintc).max
+        max_domain = Shape([large_val] * self.domain_info.ndims)
+        for name, field in field_args.items():
+            field_mask = self._get_field_mask(field)
+            upper_boundary = self.field_info[name].boundary.upper_indices.filter_mask(field_mask)
+            field_domain = Shape(field.shape) - (origin[name] + upper_boundary)
+            max_domain &= Shape.from_mask(field_domain, field_mask, default=large_val)
         return max_domain
 
     def _validate_args(self, used_field_args, used_param_args, domain, origin):
@@ -201,18 +208,21 @@ class StencilObject(abc.ABC):
                 f"Compute domain too large (provided: {domain}, maximum: {max_domain})"
             )
         for name, field in used_field_args.items():
+            field_mask = self._get_field_mask(field)
             min_origin = self.field_info[name].boundary.lower_indices
-            if origin[name] < min_origin:
+            field_shape = Shape.from_mask(field.shape, field_mask)
+            field_origin = Index.from_mask(origin[name], field_mask)
+            if field_origin < min_origin:
                 raise ValueError(
                     f"Origin for field {name} too small. Must be at least {min_origin}, is {origin[name]}"
                 )
             min_shape = tuple(
                 o + d + h
                 for o, d, h in zip(
-                    origin[name], domain, self.field_info[name].boundary.upper_indices
+                    field_origin, domain, self.field_info[name].boundary.upper_indices
                 )
             )
-            if min_shape > field.shape:
+            if min_shape > field_shape:
                 raise ValueError(
                     f"Shape of field {name} is {field.shape} but must be at least {min_shape} for given domain and origin."
                 )
@@ -294,10 +304,15 @@ class StencilObject(abc.ABC):
         if origin is None:
             origin = {}
         else:
+            # This always returns an Index
             origin = normalize_origin_mapping(origin)
 
         for name, field in used_field_args.items():
-            origin.setdefault(name, origin["_all_"] if "_all_" in origin else field.default_origin)
+            if "_all_" in origin:
+                field_mask = self._get_field_mask(field)
+                origin.setdefault(name, origin["_all_"].filter_mask(field_mask))
+            else:
+                origin.setdefault(name, field.default_origin)
 
         # Domain
         if domain is None:
