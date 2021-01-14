@@ -324,3 +324,10 @@ def two_optional_fields(
             out_a = out_a + dt * phys_tend_a
         if __INLINED(PHYS_TEND_B):
             out_b = out_b + dt * phys_tend_b
+
+
+@register
+def write_after_read(field: Field3D):
+    with computation(PARALLEL), interval(...):
+        tmp = field
+        field = tmp[-1, 0, 0]
