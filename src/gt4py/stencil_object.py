@@ -210,7 +210,7 @@ class StencilObject(abc.ABC):
         for name, field in used_field_args.items():
             field_mask = self._get_field_mask(field)
             min_origin = self.field_info[name].boundary.lower_indices
-            field_shape = Shape.from_mask(field.shape, field_mask)
+            field_shape = Shape.from_mask(field.shape, field_mask, default=np.iinfo(np.int32).max)
             field_origin = Index.from_mask(origin[name], field_mask)
             if field_origin < min_origin:
                 raise ValueError(
