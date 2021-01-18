@@ -46,7 +46,8 @@
     }
     - stage_extents: { str: str }
     - stencil_unique_name: str
-    - tmp_fields: [{ "name": str, "dtype": str }]
+    - tmp_fields: [{ "name": str, "dtype": str, "axes": str }]
+    - used_axes: [{ "name": str, "selector": str }]
 #}
 
 {%- set axes_names = ["I", "J", "K"] -%}
@@ -165,7 +166,7 @@ using p_{{ field.name }} = gt::arg<{{ arg_counter + loop.index0 }}, typename sto
 {%- endfor %}
 {% set arg_counter = arg_counter + arg_fields|length %}
 {% for param in parameters %}
-using p_{{ param.name }} = gt::arg<{{ arg_counter + loop.index0 }}, gt::global_parameter<{{ param.dtype }}>>;
+using p_{{ param.name }} = gt::arg<{{ arg_counter + loop.index0 }}, gt::global_parameter<backend_t, {{ param.dtype }}>>;
 {%- endfor %}
 {% set arg_counter = arg_counter + parameters|length %}
 {%- if requires_positional -%}

@@ -281,9 +281,7 @@ class NumPySourceGenerator(PythonSourceGenerator):
                 )
             else:
                 axis_interval = gt_ir.AxisInterval(
-                    start=gt_ir.AxisBound(
-                        level=gt_ir.LevelMarker.START, offset=axis_extents[0]
-                    ),
+                    start=gt_ir.AxisBound(level=gt_ir.LevelMarker.START, offset=axis_extents[0]),
                     end=gt_ir.AxisBound(level=gt_ir.LevelMarker.END, offset=axis_extents[1]),
                 )
 

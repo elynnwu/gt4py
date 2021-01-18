@@ -16,24 +16,32 @@
 
  ---- Template variables ----
 
-    - arg_fields: [{ "name": str, "dtype": str, "layout_id": int, "selector": [bool], "naxes": int }]
+    - arg_fields: [{ "name": str, "dtype": str, "layout_id": int }]
     - parameters: [{ "name": str, "dtype": str }]
     - stencil_unique_name: str
+    - gt_backend: str
+    - max_ndim: int
+    - profile: bool
 #}
 
-
 #include <gridtools/common/defs.hpp>
-#include <gridtools/common/gt_math.hpp>
 
 #include <array>
-#include <cstdint>
 #include <vector>
-
-
-using float32_t = float;
-using float64_t = double;
+{%- if "cuda" in gt_backend %}
+#include <cuda.h>
+#include <cuda_runtime.h>
+{%- if profile %}
+#include <cuda_profiler_api.h>
+{%- endif %}
+{%- else %}
+#include <cmath>
+{%- endif %}
 
 using py_size_t = std::intptr_t;
+using uint_t = unsigned;
+using float32_t = float;
+using float64_t = double;
 
 struct BufferInfo {
     py_size_t ndim;
@@ -42,16 +50,15 @@ struct BufferInfo {
     void* ptr;
 };
 
-
 namespace gt = ::gridtools;
 
 namespace {{ stencil_unique_name }} {
 
-void run(const std::array<gt::uint_t, 3>& domain,
+void run(const std::array<uint_t, {{ max_ndim }}>& domain,
 {%- set comma = joiner(", ") %}
 {%- for field in arg_fields -%}
          {{- comma() }}
-         const BufferInfo& bi_{{ field.name }} {{- comma() -}} const std::array<gt::uint_t, {{ field.naxes }}>& {{ field.name }}_origin
+         const BufferInfo& bi_{{ field.name }} {{- comma() -}} const std::array<uint_t, 3>& {{ field.name }}_origin
 {%- endfor %}
 {%- for param in parameters %}
          {{- comma() }}

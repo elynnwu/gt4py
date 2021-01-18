@@ -256,8 +256,10 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
         return result
 
     def _make_cpp_variable(self, decl: gt_ir.VarDecl) -> str:
-        result = "{t} {name};".format(t=self._make_cpp_type(decl.data_type), name=decl.name)
-
+        result = "{t} {name}".format(t=self._make_cpp_type(decl.data_type), name=decl.name)
+        if decl.length > 1:
+            result += "[{length}]".format(length=decl.length)
+        result += ";"
         return result
 
     def visit_ScalarLiteral(self, node: gt_ir.ScalarLiteral) -> str:
@@ -491,10 +493,17 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
         arg_fields = []
         tmp_fields = []
         storage_ids = []
+        used_axes = dict()
+        all_axes = [axis.lower() for axis in gt_definitions.CartesianSpace.names]
+
         max_ndim = 0
         for name, field_decl in node.fields.items():
             if name not in node.unreferenced:
                 max_ndim = max(max_ndim, len(field_decl.axes))
+                axes = "".join(field_decl.axes).lower()
+                selector = ["1" if axis in axes else "0" for axis in all_axes]
+                used_axes[axes] = dict(name=axes.lower(), selector=", ".join(selector))
+
                 field_attributes = {
                     "name": field_decl.name,
                     "dtype": self._make_cpp_type(field_decl.data_type),
@@ -503,6 +512,7 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
                         axis in field_decl.axes for axis in self.impl_node.domain.axes_names
                     ),
                 }
+
                 if field_decl.is_api:
                     if field_decl.layout_id not in storage_ids:
                         storage_ids.append(field_decl.layout_id)
@@ -553,6 +563,7 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
             stage_extents=stage_extents,
             stencil_unique_name=self.class_name,
             tmp_fields=tmp_fields,
+            used_axes=used_axes.values(),
         )
 
         sources: Dict[str, Dict[str, str]] = {"computation": {}, "bindings": {}}
@@ -599,8 +610,7 @@ class BaseGTBackend(gt_backend.BasePyExtBackend, gt_backend.CLIBackendMixin):
 
         # Generate and return the Python wrapper class
         return self.make_module(
-            pyext_module_name=pyext_module_name,
-            pyext_file_path=pyext_file_path,
+            pyext_module_name=pyext_module_name, pyext_file_path=pyext_file_path
         )
 
     def generate_computation(self) -> Dict[str, Union[str, Dict]]:
@@ -641,7 +651,7 @@ class BaseGTBackend(gt_backend.BasePyExtBackend, gt_backend.CLIBackendMixin):
             clean=self.builder.options.backend_opts.get("clean", False),
             **pyext_builder.get_gt_pyext_build_opts(
                 debug_mode=self.builder.options.backend_opts.get("debug_mode", False),
-                add_profile_info=self.builder.options.backend_opts.get("add_profile_info", False),
+                add_profile_info=self.builder.options.backend_opts.get("add_profile_info", True),
                 uses_cuda=uses_cuda,
             ),
         )

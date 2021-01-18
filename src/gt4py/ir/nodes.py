@@ -89,7 +89,7 @@ storing a reference to the piece of source code which originated the node.
     Literal     = ScalarLiteral(value: Any (should match DataType), data_type: DataType)
                 | BuiltinLiteral(value: Builtin)
 
-    Ref         = VarRef(name: str, [index: int])
+    Ref         = VarRef(name: str, isarray: bool = False, [index: int])
                 | FieldRef(name: str, offset: Dict[str, int])
 
     NativeFuncCall(func: NativeFunction, args: List[Expr], data_type: DataType)
@@ -151,7 +151,9 @@ Implementation IR
 
     ApplyBlock(interval: AxisInterval,
                local_symbols: Dict[str, VarDecl],
-               body: BlockStmt)
+               body: BlockStmt,
+               metadata: Dict[str, Any] = dict(),
+               init_stmt: List[Statement] = list())
 
     Stage(name: str,
           accessors: List[Accessor],
@@ -395,6 +397,7 @@ class Ref(Expr):
 @attribclass
 class VarRef(Ref):
     name = attribute(of=str)
+    isarray = attribute(of=bool, default=False)
     index = attribute(of=int, optional=True)
     loc = attribute(of=Location, optional=True)
 
@@ -779,6 +782,8 @@ class ApplyBlock(Node):
     interval = attribute(of=AxisInterval)
     local_symbols = attribute(of=DictOf[str, VarDecl])
     body = attribute(of=BlockStmt)
+    metadata = attribute(of=DictOf[str, Any], default=dict())
+    init_stmt = attribute(of=ListOf[Statement], default=list())
 
 
 @attribclass
