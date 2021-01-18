@@ -253,8 +253,10 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
         return result
 
     def _make_cpp_variable(self, decl: gt_ir.VarDecl) -> str:
-        result = "{t} {name};".format(t=self._make_cpp_type(decl.data_type), name=decl.name)
-
+        result = "{t} {name}".format(t=self._make_cpp_type(decl.data_type), name=decl.name)
+        if decl.length > 1:
+            result += "[{length}]".format(length=decl.length)
+        result += ";"
         return result
 
     def visit_ScalarLiteral(self, node: gt_ir.ScalarLiteral) -> str:
