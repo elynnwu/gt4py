@@ -122,7 +122,7 @@ class StencilObject(abc.ABC):
 
     def _get_field_mask(self, field_name: str) -> Tuple[bool]:
         field_axes = self.field_info[field_name].axes
-        return list(axis in field_axes for axis in CartesianSpace.names)
+        return tuple(axis in field_axes for axis in CartesianSpace.names)
 
     def _get_max_domain(self, field_args, origin):
         """Return the maximum domain size possible
@@ -143,14 +143,15 @@ class StencilObject(abc.ABC):
         large_val = np.iinfo(np.uintc).max
         max_domain = Shape([large_val] * self.domain_info.ndims)
         for name, field in field_args.items():
-            storage_mask = field.mask
             api_mask = self._get_field_mask(name)
-            if storage_mask != api_mask:
-                raise ValueError(
-                    f"The storage for '{name}' has mask '{storage_mask}', but the API signature expects '{api_mask}'"
-                )
+            if isinstance(field, gt_storage.storage.Storage):
+                storage_mask = tuple(field.mask)
+                if storage_mask != api_mask:
+                    raise ValueError(
+                        f"The storage for '{name}' has mask '{storage_mask}', but the API signature expects '{api_mask}'"
+                    )
             upper_boundary = self.field_info[name].boundary.upper_indices.filter_mask(api_mask)
-            field_domain = Shape(field.shape) - (origin[name] + upper_boundary)
+            field_domain = Shape(field.shape) - (Index(origin[name]) + upper_boundary)
             max_domain &= Shape.from_mask(field_domain, api_mask, default=large_val)
         return max_domain
 
@@ -189,13 +190,13 @@ class StencilObject(abc.ABC):
                     f"The dtype of field '{name}' is '{field.dtype}' instead of '{field_dtype}'"
                 )
 
-            field_mask = self._get_field_mask(name)
-            if field.mask != field_mask:
-                raise ValueError(
-                    f"The storage for '{name}' has mask '{field.mask}', but the API signature expects '{field_mask}'"
-                )
-
             if isinstance(field, gt_storage.storage.Storage):
+                field_mask = self._get_field_mask(name)
+                if tuple(field.mask) != field_mask:
+                    raise ValueError(
+                        f"The storage for '{name}' has mask '{field.mask}', but the API signature expects '{field_mask}'"
+                    )
+
                 if not field.is_stencil_view:
                     raise ValueError(
                         f"An incompatible view was passed for field {name} to the stencil. "
