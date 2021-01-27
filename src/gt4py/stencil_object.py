@@ -151,7 +151,7 @@ class StencilObject(abc.ABC):
                         f"The storage for '{name}' has mask '{storage_mask}', but the API signature expects '{api_mask}'"
                     )
             upper_boundary = self.field_info[name].boundary.upper_indices.filter_mask(api_mask)
-            field_domain = Shape(field.shape) - (Index(origin[name]) + upper_boundary)
+            field_domain = Shape(field.shape) - (origin[name] + upper_boundary)
             max_domain &= Shape.from_mask(field_domain, api_mask, default=large_val)
         return max_domain
 
@@ -192,9 +192,10 @@ class StencilObject(abc.ABC):
 
             if isinstance(field, gt_storage.storage.Storage):
                 field_mask = self._get_field_mask(name)
-                if tuple(field.mask) != field_mask:
+                storage_mask = tuple(field.mask)
+                if storage_mask != field_mask:
                     raise ValueError(
-                        f"The storage for '{name}' has mask '{field.mask}', but the API signature expects '{field_mask}'"
+                        f"The storage for '{name}' has mask '{storage_mask}', but the API signature expects '{field_mask}'"
                     )
 
                 if not field.is_stencil_view:
