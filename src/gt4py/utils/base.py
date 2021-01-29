@@ -29,7 +29,7 @@ import os
 import string
 import sys
 import types
-from typing import Any, Sequence, Tuple
+from typing import Any, Optional, Sequence, Tuple
 
 
 NOTHING = object()
@@ -49,6 +49,14 @@ def listify(value):
 
 # def stringify(value):
 #     pass
+
+
+def tuplize(value: Optional[collections.abc.Sequence]) -> Optional[Tuple[Any, ...]]:
+    """Return value as a tuple, if possible."""
+    if value is None:
+        return value
+    else:
+        return tuple(value)
 
 
 def jsonify(value, indent=2):

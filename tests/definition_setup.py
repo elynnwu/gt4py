@@ -14,7 +14,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from typing import Iterator, List, Set, Tuple, Union
+from typing import Iterator, List, Optional, Set, Tuple, Union
 
 import pytest
 
@@ -179,13 +179,32 @@ class TDefinition(TObject):
 
 class TComputationBlock(TObject):
     def __init__(
-        self, *, order: IterationOrder, start: int = 0, end: int = 0, scope: str = "<unnamed>"
+        self,
+        *,
+        order: IterationOrder,
+        start: int = 0,
+        end: int = 0,
+        scope: str = "<unnamed>",
     ):
         super().__init__(Location(line=0, column=0))
         self.order = order
         self.start = start
         self.end = end
         self.scope = scope
+        self.parallel_interval: Optional[List[AxisInterval]] = None
+
+    def with_parallel_interval(self, *intervals) -> "TComputationBlock":
+        parallel_interval = [
+            interval
+            if interval is not None
+            else AxisInterval(
+                start=AxisBound(level=LevelMarker.START, extend=True),
+                end=AxisBound(level=LevelMarker.END, extend=True),
+            )
+            for interval in intervals
+        ]
+        self.parallel_interval = parallel_interval
+        return self
 
     def add_statements(self, *stmts: "TStatement") -> "TComputationBlock":
         for stmt in stmts:
@@ -204,6 +223,7 @@ class TComputationBlock(TObject):
                 start=AxisBound(level=LevelMarker.START, offset=self.start),
                 end=AxisBound(level=LevelMarker.END, offset=self.end),
             ),
+            parallel_interval=self.parallel_interval,
             iteration_order=self.order,
             body=BlockStmt(
                 stmts=[stmt.build() for stmt in self.children],
