@@ -14,11 +14,11 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from typing import Iterator, List, Set, Tuple, Union
+from typing import Iterator, List, Optional, Set, Tuple, Union
 
 import pytest
 
-from gt4py.analysis import TransformData
+from gt4py.analysis import IntervalInfo, TransformData
 from gt4py.definitions import BuildOptions
 from gt4py.ir.nodes import (
     ArgumentInfo,
@@ -179,13 +179,32 @@ class TDefinition(TObject):
 
 class TComputationBlock(TObject):
     def __init__(
-        self, *, order: IterationOrder, start: int = 0, end: int = 0, scope: str = "<unnamed>"
+        self,
+        *,
+        order: IterationOrder,
+        start: int = 0,
+        end: int = 0,
+        scope: str = "<unnamed>",
     ):
         super().__init__(Location(line=0, column=0))
         self.order = order
         self.start = start
         self.end = end
         self.scope = scope
+        self.parallel_interval: Optional[List[AxisInterval]] = None
+
+    def with_parallel_interval(self, *intervals) -> "TComputationBlock":
+        parallel_interval = [
+            interval
+            if interval is not None
+            else AxisInterval(
+                start=AxisBound(level=LevelMarker.START, offset=IntervalInfo.MAX_INT),
+                end=AxisBound(level=LevelMarker.END, offset=-IntervalInfo.MAX_INT),
+            )
+            for interval in intervals
+        ]
+        self.parallel_interval = parallel_interval
+        return self
 
     def add_statements(self, *stmts: "TStatement") -> "TComputationBlock":
         for stmt in stmts:
@@ -204,6 +223,7 @@ class TComputationBlock(TObject):
                 start=AxisBound(level=LevelMarker.START, offset=self.start),
                 end=AxisBound(level=LevelMarker.END, offset=self.end),
             ),
+            parallel_interval=self.parallel_interval,
             iteration_order=self.order,
             body=BlockStmt(
                 stmts=[stmt.build() for stmt in self.children],

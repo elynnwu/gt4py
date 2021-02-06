@@ -124,7 +124,10 @@ storing a reference to the piece of source code which originated the node.
         # start is included
         # end is excluded
 
-    ComputationBlock(interval: AxisInterval, iteration_order: IterationOrder, body: BlockStmt)
+    ComputationBlock(interval: AxisInterval,
+                     [parallel_interval: List[AxisInterval],]
+                     iteration_order: IterationOrder,
+                     body: BlockStmt)
 
     ArgumentInfo(name: str, is_keyword: bool, [default: Any])
 
@@ -152,7 +155,8 @@ Implementation IR
     Stage(name: str,
           accessors: List[Accessor],
           apply_blocks: List[ApplyBlock],
-          compute_extent: Extent)
+          compute_extent: Extent,
+          [parallel_interval: List[AxisInterval]])
 
     StageGroup(stages: List[Stage])
 
@@ -244,6 +248,10 @@ class Domain(Node):
     @property
     def axes_names(self):
         return [ax.name for ax in self.axes]
+
+    @property
+    def par_axes_names(self):
+        return [axis.name for axis in self.parallel_axes]
 
     @property
     def ndims(self):
@@ -716,6 +724,7 @@ class AxisInterval(Node):
 @attribclass
 class ComputationBlock(Node):
     interval = attribute(of=AxisInterval)
+    parallel_interval = attribute(of=ListOf[AxisInterval], optional=True)
     iteration_order = attribute(of=IterationOrder)
     body = attribute(of=BlockStmt)
     loc = attribute(of=Location, optional=True)
@@ -776,6 +785,7 @@ class Stage(IIRNode):
     accessors = attribute(of=ListOf[Accessor])
     apply_blocks = attribute(of=ListOf[ApplyBlock])
     compute_extent = attribute(of=Extent)
+    parallel_interval = attribute(of=ListOf[AxisInterval], optional=True)
 
 
 # @enum.unique

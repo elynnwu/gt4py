@@ -34,6 +34,7 @@ from typing import (
     Union,
 )
 
+import gt4py.utils as gt_utils
 from gt4py import definitions as gt_definitions
 from gt4py import ir as gt_ir
 from gt4py.analysis import (
@@ -79,6 +80,110 @@ class DataTypeSpecificationError(IRSpecificationError):
             else:
                 message = f"Invalid data type specification '{data_type}' in '{loc.scope}' (line: {loc.line}, col: {loc.column})"
         super().__init__(message, loc=loc)
+
+
+class StatementInfoMaker(gt_ir.IRNodeVisitor):
+    @classmethod
+    def apply(
+        cls, transform_data: TransformData, node: Union[gt_ir.Statement, gt_ir.BlockStmt]
+    ) -> StatementInfo:
+        statement_info = cls(transform_data).visit(node)
+        return statement_info
+
+    def visit_BlockStmt(self, node: gt_ir.BlockStmt) -> StatementInfo:
+        """Returns a singke StatementInfo for the block of statements."""
+        inputs = {}
+        outputs = set()
+        for stmt in node.stmts:
+            stmt_info = self.visit(stmt)
+            inputs = self._merge_extents(list(inputs.items()) + list(stmt_info.inputs.items()))
+            outputs |= stmt_info.outputs
+
+        result = StatementInfo(self.data.id_generator.new, node, inputs, outputs)
+
+        return result
+
+    def __init__(self, transform_data: TransformData):
+        self.data = transform_data
+
+    def visit_Expr(self, node: gt_ir.Expr) -> List[Tuple[str, Optional[Extent]]]:
+        return []
+
+    def visit_VarRef(self, node: gt_ir.VarRef) -> List[Tuple[str, Optional[Extent]]]:
+        result = [(node.name, None)]
+        return result
+
+    def visit_FieldRef(self, node: gt_ir.FieldRef) -> List[Tuple[str, Optional[Extent]]]:
+        extent = Extent.from_offset([node.offset.get(ax, 0) for ax in self.data.axes_names])
+        result = [(node.name, extent)]
+        return result
+
+    def visit_UnaryOpExpr(self, node: gt_ir.UnaryOpExpr) -> List[Tuple[str, Optional[Extent]]]:
+        result = self.visit(node.arg)
+        return result
+
+    def visit_BinOpExpr(self, node: gt_ir.BinOpExpr) -> List[Tuple[str, Optional[Extent]]]:
+        result = self.visit(node.lhs) + self.visit(node.rhs)
+        return result
+
+    def visit_TernaryOpExpr(self, node: gt_ir.TernaryOpExpr) -> List[Tuple[str, Optional[Extent]]]:
+        result = (
+            self.visit(node.condition) + self.visit(node.then_expr) + self.visit(node.else_expr)
+        )
+        return result
+
+    def visit_Statement(self, node: gt_ir.Statement) -> None:
+        assert False
+
+    def visit_Decl(self, node: gt_ir.Decl) -> None:
+        assert node.is_api is False
+        assert node.name in self.data.symbols
+        return None
+
+    def visit_Assign(self, node: gt_ir.Assign) -> StatementInfo:
+        target_name = node.target.name
+        assert target_name in self.data.symbols
+        inputs = self._merge_extents(self.visit(node.value))
+        result = StatementInfo(self.data.id_generator.new, node, inputs, {target_name})
+
+        return result
+
+    def visit_NativeFuncCall(
+        self, node: gt_ir.NativeFuncCall
+    ) -> List[Tuple[str, Optional[Extent]]]:
+        return [name_and_extent for arg in node.args for name_and_extent in self.visit(arg)]
+
+    def visit_If(self, node: gt_ir.If) -> StatementInfo:
+        inputs = {}
+        outputs = set()
+
+        stmts = list(node.main_body.stmts)
+        if node.else_body is not None:
+            stmts.extend(node.else_body.stmts)
+        for stmt in stmts:
+            stmt_info = self.visit(stmt)
+            inputs = self._merge_extents(list(inputs.items()) + list(stmt_info.inputs.items()))
+            outputs |= stmt_info.outputs
+        cond_info = self.visit(node.condition)
+        inputs = self._merge_extents(list(inputs.items()) + cond_info)
+
+        result = StatementInfo(self.data.id_generator.new, node, inputs, outputs)
+
+        return result
+
+    def _merge_extents(self, refs: list):
+        result = {}
+
+        # Merge offsets for same symbol
+        for name, extent in refs:
+            extent = extent or Extent.zeros()
+            result.setdefault(name, Extent.zeros())
+            result[name] |= extent
+
+        return result
+
+
+make_statement_info = StatementInfoMaker.apply
 
 
 class InitInfoPass(TransformPass):
@@ -251,92 +356,43 @@ class InitInfoPass(TransformPass):
         def __call__(self, transform_data: TransformData):
             self.data = transform_data
             self.current_block_info = None
-            self.zero_extent = Extent.zeros(transform_data.ndims)
             self.visit(self.data.definition_ir)
 
-        def visit_Expr(self, node: gt_ir.Expr):
-            return []
+        def _make_parallel_interval_info(
+            self,
+            parallel_interval: List[gt_ir.AxisInterval],
+        ) -> List[IntervalInfo]:
+            parallel_interval_info = [
+                IntervalInfo(
+                    start=(
+                        0 if axis_interval.start.level == gt_ir.LevelMarker.START else 1,
+                        axis_interval.start.offset,
+                    ),
+                    end=(
+                        0 if axis_interval.end.level == gt_ir.LevelMarker.START else 1,
+                        axis_interval.end.offset,
+                    ),
+                )
+                for axis_interval in parallel_interval
+            ]
 
-        def visit_VarRef(self, node: gt_ir.VarRef):
-            result = [(node.name, None)]
-            return result
-
-        def visit_FieldRef(self, node: gt_ir.FieldRef):
-            extent = Extent.from_offset([node.offset.get(ax, 0) for ax in self.data.axes_names])
-            result = [(node.name, extent)]
-            return result
-
-        def visit_UnaryOpExpr(self, node: gt_ir.UnaryOpExpr):
-            result = self.visit(node.arg)
-            return result
-
-        def visit_BinOpExpr(self, node: gt_ir.BinOpExpr):
-            result = self.visit(node.lhs) + self.visit(node.rhs)
-            return result
-
-        def visit_TernaryOpExpr(self, node: gt_ir.TernaryOpExpr):
-            result = (
-                self.visit(node.condition) + self.visit(node.then_expr) + self.visit(node.else_expr)
-            )
-            return result
-
-        def visit_Statement(self, node: gt_ir.Statement):
-            assert False
-
-        def visit_Decl(self, node: gt_ir.Decl):
-            assert node.is_api is False
-            assert node.name in self.data.symbols
-            return None
-
-        def visit_Assign(self, node: gt_ir.Assign):
-            target_name = node.target.name
-            assert target_name in self.data.symbols
-            inputs = self._merge_extents(self.visit(node.value))
-            result = StatementInfo(self.data.id_generator.new, node, inputs, {target_name})
-
-            return result
-
-        def visit_NativeFuncCall(self, node: gt_ir.NativeFuncCall):
-            return [extent for arg in node.args for extent in self.visit(arg)]
-
-        def visit_If(self, node: gt_ir.If):
-            inputs = {}
-            outputs = set()
-
-            stmts = list(node.main_body.stmts)
-            if node.else_body is not None:
-                stmts.extend(node.else_body.stmts)
-            for stmt in stmts:
-                stmt_info = self.visit(stmt)
-                inputs = self._merge_extents(list(inputs.items()) + list(stmt_info.inputs.items()))
-                outputs |= stmt_info.outputs
-            cond_info = self.visit(node.condition)
-            inputs = self._merge_extents(list(inputs.items()) + cond_info)
-
-            result = StatementInfo(self.data.id_generator.new, node, inputs, outputs)
-
-            return result
-
-        def visit_BlockStmt(self, node: gt_ir.BlockStmt):
-            inputs = {}
-            outputs = set()
-            for stmt in node.stmts:
-                stmt_info = self.visit(stmt)
-                inputs = self._merge_extents(list(inputs.items()) + list(stmt_info.inputs.items()))
-                outputs |= stmt_info.outputs
-
-            result = StatementInfo(self.data.id_generator.new, node, inputs, outputs)
-
-            return result
+            return parallel_interval_info
 
         def visit_ComputationBlock(self, node: gt_ir.ComputationBlock):
             """Traverse statements, creating new IJBlockInfo where non-zero
             accesses to output fields are made."""
             interval = next(iter(self.current_block_info.intervals))
+            parallel_interval = (
+                self._make_parallel_interval_info(node.parallel_interval)
+                if node.parallel_interval
+                else None
+            )
             interval_block = IntervalBlockInfo(self.data.id_generator.new, interval)
 
             stmt_infos = [
-                info for info in [self.visit(stmt) for stmt in node.body.stmts] if info is not None
+                info
+                for info in [make_statement_info(self.data, stmt) for stmt in node.body.stmts]
+                if info is not None
             ]
             group_outputs = set()
 
@@ -352,6 +408,12 @@ class InitInfoPass(TransformPass):
 
                 # Open a new stage when it is not possible to use the current one
                 if not group_outputs.isdisjoint(stmt_inputs_with_ij_offset):
+                    if parallel_interval:
+                        raise Exception(
+                            "Cannot read with an offset after writing to a symbol "
+                            "in a restricted compute block"
+                        )
+
                     assert interval_block.stmts
                     assert interval_block.outputs
                     # If some output field is read with an offset it likely implies different
@@ -362,6 +424,7 @@ class InitInfoPass(TransformPass):
                     interval_block = IntervalBlockInfo(self.data.id_generator.new, interval)
                     group_outputs = set()
 
+                # if inside a parallel region, these extents are not really valid
                 interval_block.stmts.append(stmt_info)
                 interval_block.outputs |= stmt_info.outputs
                 for name, extent in stmt_info.inputs.items():
@@ -371,7 +434,9 @@ class InitInfoPass(TransformPass):
 
             if interval_block.stmts:
                 self.current_block_info.ij_blocks.append(
-                    self._make_ij_block(interval, interval_block)
+                    self._make_ij_block(
+                        interval, interval_block, parallel_interval=parallel_interval
+                    )
                 )
 
         def visit_StencilDefinition(self, node: gt_ir.StencilDefinition):
@@ -383,28 +448,18 @@ class InitInfoPass(TransformPass):
                 self.visit(computation)
                 self.data.blocks.append(self.current_block_info)
 
-        def _make_ij_block(self, interval, interval_block):
+        def _make_ij_block(self, interval, interval_block, parallel_interval=None):
             ij_block = IJBlockInfo(
                 self.data.id_generator.new,
                 {interval},
+                parallel_interval=parallel_interval,
                 interval_blocks=[interval_block],
                 inputs={**interval_block.inputs},
                 outputs=set(interval_block.outputs),
-                compute_extent=self.zero_extent,
+                compute_extent=Extent.zeros(),
             )
 
             return ij_block
-
-        def _merge_extents(self, refs: list):
-            result = {}
-
-            # Merge offsets for same symbol
-            for name, extent in refs:
-                extent = extent or Extent.zeros()
-                result.setdefault(name, Extent.zeros())
-                result[name] |= extent
-
-            return result
 
     @property
     def defaults(self) -> Dict[str, Any]:
@@ -442,24 +497,33 @@ class NormalizeBlocksPass(TransformPass):
 
             return self._split_blocks
 
-        def visit_DomainBlockInfo(self, block: DomainBlockInfo, context: Dict[str, Any]) -> None:
+        def visit_DomainBlockInfo(
+            self, block: DomainBlockInfo, context: Dict[str, Any], **kwargs
+        ) -> None:
             context["iteration_order"] = block.iteration_order
             for ij_block in block.ij_blocks:
                 self.visit_IJBlockInfo(ij_block, context)
 
-        def visit_IJBlockInfo(self, ij_block: IJBlockInfo, context: Dict[str, Any]) -> None:
+        def visit_IJBlockInfo(
+            self, ij_block: IJBlockInfo, context: Dict[str, Any], **kwargs
+        ) -> None:
             for interval_block in ij_block.interval_blocks:
-                self.visit_IntervalBlockInfo(interval_block, context)
+                self.visit_IntervalBlockInfo(
+                    interval_block, context, parallel_interval=ij_block.parallel_interval
+                )
 
         def visit_IntervalBlockInfo(
-            self, interval_block: IntervalBlockInfo, context: Dict[str, Any]
+            self, interval_block: IntervalBlockInfo, context: Dict[str, Any], **kwargs
         ) -> None:
             context["interval"] = interval_block.interval
             for statement in interval_block.stmts:
-                self.visit_StatemenInfo(statement, context)
+                self.visit_StatemenInfo(statement, context, **kwargs)
 
         def visit_StatemenInfo(
-            self, statement: StatementInfo, context: Dict[str, Any]
+            self,
+            statement: StatementInfo,
+            context: Dict[str, Any],
+            parallel_interval: List[gt_ir.AxisInterval],
         ) -> DomainBlockInfo:
             new_interval_block = IntervalBlockInfo(
                 context["id_generator"].new,
@@ -471,6 +535,7 @@ class NormalizeBlocksPass(TransformPass):
             new_ij_block = IJBlockInfo(
                 context["id_generator"].new,
                 {context["interval"]},
+                parallel_interval,
                 [new_interval_block],
                 {**new_interval_block.inputs},
                 set(new_interval_block.outputs),
@@ -641,6 +706,12 @@ class StageMergingWrapper:
         if not (self.compute_extent == candidate.compute_extent):
             return False
 
+        # Check if the two stages have the same parallel interval
+        this_parallel_interval = gt_utils.tuplize(self.parallel_interval)
+        cand_parallel_interval = gt_utils.tuplize(candidate.parallel_interval)
+        if this_parallel_interval != cand_parallel_interval:
+            return False
+
         # Check that there is not overlap between stage intervals and that
         # merging stages will not imply a reordering of the execution order
         if self.has_incompatible_intervals_with(candidate):
@@ -750,6 +821,10 @@ class StageMergingWrapper:
         return self._stage.intervals
 
     @property
+    def parallel_interval(self) -> Optional[List[gt_ir.AxisInterval]]:
+        return self._stage.parallel_interval
+
+    @property
     def interval_blocks(self) -> List[IntervalBlockInfo]:
         return self._stage.interval_blocks
 
@@ -829,6 +904,45 @@ class MergeBlocksPass(TransformPass):
         transform_data.blocks = merged_blocks
 
 
+def overlap_with_extent(
+    interval: IntervalInfo, axis_extent: Tuple[int, int]
+) -> Optional[Tuple[int, int]]:
+    """Return a tuple of the distances to the edge of the compute domain, if overlapping."""
+    if interval.start[0] == 0:
+        start_diff = axis_extent[0] - interval.start[1]
+    else:
+        start_diff = None
+
+    if interval.end[0] == 1:
+        end_diff = axis_extent[1] - interval.end[1]
+    else:
+        end_diff = None
+
+    if start_diff is not None and start_diff > 0 and end_diff is None:
+        if interval.end[1] <= axis_extent[0]:
+            return None
+    elif end_diff is not None and end_diff < 0 and start_diff is None:
+        if interval.start[1] > axis_extent[1]:
+            return None
+
+    start_diff = min(start_diff, 0) if start_diff is not None else -IntervalInfo.MAX_INT
+    end_diff = max(end_diff, 0) if end_diff is not None else IntervalInfo.MAX_INT
+    return (start_diff, end_diff)
+
+
+def compute_extent_diff(ij_block: IJBlockInfo, seq_axis: int) -> Optional[Extent]:
+    if ij_block.parallel_interval is None:
+        return Extent.zeros()[:seq_axis]
+    diffs = []
+    for iinfo, ij_extent in zip(ij_block.parallel_interval, ij_block.compute_extent):
+        diff = overlap_with_extent(iinfo, ij_extent)
+        if not diff:
+            return None
+        else:
+            diffs.append(diff)
+    return Extent(diffs)
+
+
 class ComputeExtentsPass(TransformPass):
     """Loop over blocks backwards and accumulate extents.
 
@@ -844,8 +958,14 @@ class ComputeExtentsPass(TransformPass):
     def defaults(self) -> Dict[str, Any]:
         return self._DEFAULT_OPTIONS
 
-    @staticmethod
-    def apply(transform_data: TransformData) -> None:
+    def __init__(self, transform_data: TransformData):
+        self.data = transform_data
+        self.seq_axis = self.data.definition_ir.domain.index(
+            transform_data.definition_ir.domain.sequential_axis
+        )
+
+    @classmethod
+    def apply(cls, transform_data: TransformData) -> None:
         seq_axis = transform_data.definition_ir.domain.index(
             transform_data.definition_ir.domain.sequential_axis
         )
@@ -857,19 +977,45 @@ class ComputeExtentsPass(TransformPass):
         for dom_block in reversed(blocks):
             for ij_block in reversed(dom_block.ij_blocks):
                 ij_block.compute_extent = Extent.zeros()
+
+                # Accumulate extents so far (future dependencies)
                 for name in ij_block.outputs:
                     ij_block.compute_extent |= access_extents[name]
+
+                # Get the diffs of the input extents from the actual extents
+                diffs = compute_extent_diff(ij_block, seq_axis)
+
+                if diffs is None:
+                    continue
+
                 for int_block in ij_block.interval_blocks:
                     for name, extent in int_block.inputs.items():
-                        extent = Extent(
-                            list(extent[:seq_axis]) + [(0, 0)]
-                        )  # exclude sequential axis
+                        horiz_extent = Extent(extent[:seq_axis]) - diffs
+                        extent = Extent(list(horiz_extent) + [(0, 0)])  # exclude sequential axis
                         accumulated_extent = ij_block.compute_extent + extent
                         access_extents[name] |= accumulated_extent
 
         transform_data.implementation_ir.fields_extents = {
             name: Extent(extent) for name, extent in access_extents.items()
         }
+
+
+class RemoveUnreachedBlocksPass(TransformPass):
+    """Remove unused IJBlockInfos.
+
+    This happens because they have a parallel interval and are not executed."""
+
+    @classmethod
+    def apply(cls, transform_data: TransformData) -> None:
+        seq_axis = transform_data.definition_ir.domain.index(
+            transform_data.definition_ir.domain.sequential_axis
+        )
+        for dom_block in transform_data.blocks:
+            dom_block.ij_blocks = [
+                block
+                for block in dom_block.ij_blocks
+                if compute_extent_diff(block, seq_axis) is not None
+            ]
 
 
 class DataTypePass(TransformPass):
@@ -1130,6 +1276,7 @@ class BuildIIRPass(TransformPass):
             accessors=accessors,
             apply_blocks=apply_blocks,
             compute_extent=ij_block.compute_extent,
+            parallel_interval=self._make_parallel_interval(ij_block.parallel_interval),
         )
 
         return stage
@@ -1178,6 +1325,26 @@ class BuildIIRPass(TransformPass):
         result = gt_ir.AxisInterval(start=axis_bounds[0], end=axis_bounds[1])
 
         return result
+
+    def _make_parallel_interval(
+        self, intervals: Optional[List[IntervalInfo]]
+    ) -> Optional[List[gt_ir.AxisInterval]]:
+        if intervals is None:
+            return None
+
+        parallel_interval = []
+        for interval in intervals:
+            start = gt_ir.AxisBound(
+                level=gt_ir.LevelMarker.START if interval.start[0] == 0 else gt_ir.LevelMarker.END,
+                offset=interval.start[1],
+            )
+            end = gt_ir.AxisBound(
+                level=gt_ir.LevelMarker.START if interval.end[0] == 0 else gt_ir.LevelMarker.END,
+                offset=interval.end[1],
+            )
+            parallel_interval.append(gt_ir.AxisInterval(start=start, end=end))
+
+        return parallel_interval
 
 
 class DemoteLocalTemporariesToVariablesPass(TransformPass):
