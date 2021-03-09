@@ -129,34 +129,47 @@ class TestInlinedExternals:
         module = f"TestInlinedExternals_test_recursive_imports_{id_version}"
 
         @gtscript.function
-        def func_nest2():
-            from __externals__ import const
+        def func_deeply_nested():
+            from __externals__ import another_const
 
-            return const
+            return another_const
 
         @gtscript.function
-        def func_nest1():
-            from __externals__ import other
+        def func_nested():
+            from __externals__ import const
 
-            return other()
+            return const + func_deeply_nested()
+
+        @gtscript.function
+        def func():
+            from __externals__ import other_call
+
+            return other_call()
 
         def definition_func(inout_field: gtscript.Field[float]):
             from __externals__ import some_call
 
             with computation(PARALLEL), interval(...):
-                inout_field = func_nest1() + some_call()
+                inout_field = func() + some_call()
 
         stencil_id, def_ir = compile_definition(
             definition_func,
             "test_recursive_imports",
             module,
-            externals={"some_call": func_nest1, "other": func_nest2, "const": GLOBAL_CONSTANT},
+            externals={
+                "some_call": func,
+                "other_call": func_nested,
+                "const": GLOBAL_CONSTANT,
+                "another_const": GLOBAL_CONSTANT,
+            },
         )
         assert set(def_ir.externals.keys()) == {
             "some_call",
             "const",
-            "other",
-            "func_nest1",
+            "other_call",
+            "func",
+            "another_const",
+            "tests.test_unittest.test_gtscript_frontend.func_nested.func_deeply_nested",
         }
 
     def test_decorated_freeze(self):
@@ -692,7 +705,8 @@ class TestReducedDimensions:
                 field_out = field_in[0, 0, 1]
 
         with pytest.raises(
-            gt_frontend.GTScriptSyntaxError, match="Incorrect offset specification detected"
+            gt_frontend.GTScriptSyntaxError,
+            match="Incorrect offset .* to field .* with dimensions .*",
         ):
             compile_definition(definition, "test_error_syntax", module, externals=externals)
 
@@ -709,7 +723,7 @@ class TestReducedDimensions:
 
         with pytest.raises(
             gt_frontend.GTScriptSyntaxError,
-            match="Cannot assign to a field unless all parallel axes are present",
+            match="Cannot assign to field .* as all parallel axes .* are not present",
         ):
             compile_definition(definition, "test_error_annotation", module, externals=externals)
 
