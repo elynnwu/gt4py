@@ -122,12 +122,12 @@ Examples:
 !$ser data pp_field=pp pq=pq if test_counter<30
 \end{lstlisting}
 
-\subsection{\texttt{DATA\_KBUFF}}
+\subsection{\texttt{DATA\_BUFF}}
 Serialize a data field within a loop over the k-index. This directive has the same general syntax as \texttt{DATA} but the user is required to provide the current value of the k-loop index (k\_value) and the extent of the k-loop (k\_size).
 
 Examples:
 \begin{lstlisting}
-!$ser data_kbuff k_value=k k_size=ke pt=pt(:,:) pq=pq(:,:)
+!$ser data_buff k_value=k k_size=ke pt=pt(:,:) pq=pq(:,:)
 \end{lstlisting}
 
 Note: Currently only 3d-fields adhering to the (i,j,k) indexing convention are supported.

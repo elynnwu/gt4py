@@ -101,7 +101,7 @@ class PpSer:
             'datawrite':        'fs_write_field',
             'dataread':         'fs_read_field',
             'datareadperturb':  'fs_read_field',
-            'datakbuff':        'fs_write_kbuff',
+            'data_buff':        'fs_write_field_buff',
             'option':           'fs_Option',
             'serinfo':          'fs_add_serializer_metainfo',
             'register':         'fs_register_field',
@@ -118,7 +118,7 @@ class PpSer:
         self.language = {
             'cleanup':         ['CLEANUP', 'CLE'],
             'data':            ['DATA', 'DAT'],
-            'data_kbuff':      ['DATA_KBUFF', 'KBU'],
+            'data_buff':       ['DATA_BUFF', 'DBU'],
             'accdata':         ['ACCDATA', 'ACC'],
             'mode':            ['MODE', 'MOD'],
             'init':            ['INIT', 'INI'],
@@ -495,12 +495,12 @@ class PpSer:
 
         self.__line = l
 
-    # KBUFF directive
-    def __ser_kbuff(self, args, isacc=False):
+    # DATA_BUFF directive
+    def __ser_data_buff(self, args, isacc=False):
 
         (dirs, keys, values, if_statement) = self.__ser_arg_parse(args)
 
-        # generate serialization code        
+        # generate serialization code
         l = '! file: ' + self.infile + ' lineno: #' + str(self.__linenum) + '\n'
         tab = ''
 
@@ -512,17 +512,28 @@ class PpSer:
             v = re.sub(r'\(.+\)', '', v)
             if v not in self.intentin_to_remove:
                 self.intentin_to_remove.append(v)
-            
+
         d = dict(zip(keys, values))
-        k_value = d.pop('k')
-        k_size = d.pop('k_size')
+        if 'i' in d.keys():
+            buff_dim = 1
+            index = d.pop('i')
+            index_size = d.pop('i_size')
+        if 'j' in d.keys():
+            buff_dim = 2
+            index = d.pop('j')
+            index_size = d.pop('j_size')
+        if 'k' in d.keys():
+            buff_dim = 3
+            index = d.pop('k')
+            index_size = d.pop('k_size')
 
         self.__calls.add(self.methods['getmode'])
         for k, v in zip(keys, values):
-            if (k != 'k') and (k != 'k_size'):
-              l += tab + '    ' + 'call ' + self.methods['datakbuff'] + \
-                  '(ppser_serializer, ppser_savepoint, \'' + k + '\', ' + v + ', k=' + \
-                  k_value + ', k_size=' + k_size + ', mode=' + self.methods['getmode'] +'())\n'
+            if k not in ['i', 'i_size', 'j', 'j_size', 'k', 'k_size']:
+                l += tab + '    ' + 'call ' + self.methods['data_buff'] + \
+                    '(ppser_serializer, ppser_savepoint, \'' + k + '\', ' + v + ', buff_dim=' + \
+                    str(buff_dim) + ', index=' + index + ', index_size=' + index_size + \
+                    ', mode=' + self.methods['getmode'] +'())\n'
 
         if if_statement:
             l += 'ENDIF\n'
@@ -746,8 +757,8 @@ class PpSer:
                     self.__ser_data(args, True)
                 elif args[0].upper() in self.language['data']:
                     self.__ser_data(args)
-                elif args[0].upper() in self.language['data_kbuff']:
-                    self.__ser_kbuff(args)
+                elif args[0].upper() in self.language['data_buff']:
+                    self.__ser_data_buff(args)
                 elif args[0].upper() in self.language['tracer']:
                     self.__ser_tracer(args)
                 elif args[0].upper() in self.language['registertracers']:
