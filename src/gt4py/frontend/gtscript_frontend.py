@@ -166,6 +166,52 @@ class AssertionChecker(ast.NodeTransformer):
             return node
 
 
+class OldAssertionChecker(ast.NodeTransformer):
+    """Check assertions and remove from the AST for further parsing."""
+
+    @classmethod
+    def apply(cls, func_node: ast.FunctionDef, context: dict, source: str):
+        checker = cls(context, source)
+        checker(func_node)
+
+    def __init__(self, context):
+        self.context = context
+
+    def _process_assertion(self, expr_node) -> None:
+        condition_value = gt_utils.meta.ast_eval(expr_node, self.context, default=NOTHING)
+        if condition_value is not NOTHING:
+            if not condition_value:
+                loc = gt_ir.Location.from_ast_node(expr_node)
+                raise GTScriptAssertionError(
+                    "GTScript external_assert failed at '{scope}' (line: {line}, col: {col})".format(
+                        scope=loc.scope, line=loc.line, col=loc.column
+                    )
+                )
+        else:
+            raise GTScriptSyntaxError(
+                "Evaluation of external_assert condition failed at the preprocessing step."
+            )
+        return None
+
+    def _process_call(self, node: ast.Call) -> Optional[ast.Call]:
+        name = gt_meta.get_qualified_name_from_node(node.func)
+        if name != "external_assert":
+            return node
+        else:
+            if len(node.args) != 1:
+                raise GTScriptSyntaxError(
+                    "Invalid assertion. Correct syntax: external_assert(condition)"
+                )
+            return self._process_assertion(node.args[0])
+
+    def visit_Expr(self, node: ast.Expr) -> Optional[ast.AST]:
+        if isinstance(node.value, ast.Call):
+            ret = self._process_call(node.value)
+            return ast.Expr(value=ret) if ret else None
+        else:
+            return node
+
+
 class AxisIntervalParser(gt_meta.ASTPass):
     """Parse Python AST interval syntax in the form of a Slice.
     Corner cases: `ast.Ellipsis` refers to the entire interval, and
@@ -1801,6 +1847,7 @@ class GTScriptParser(ast.NodeVisitor):
         # Cleaner.apply(self.definition_ir)
 
         AssertionChecker.apply(main_func_node, context=local_context, source=self.source)
+        OldAssertionChecker.apply(main_func_node, context=local_context, source=self.source)
 
         # Generate definition IR
         domain = gt_ir.Domain.LatLonGrid()
