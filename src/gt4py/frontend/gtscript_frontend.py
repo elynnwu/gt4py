@@ -125,22 +125,20 @@ class AssertionChecker(ast.NodeTransformer):
 
     @classmethod
     def apply(cls, func_node: ast.FunctionDef, context: dict, source: str):
-        checker = cls(context)
+        checker = cls(context, source)
         checker.visit(func_node)
 
-    def __init__(self, context):
+    def __init__(self, context, source):
         self.context = context
+        self.source = source
 
     def _process_assertion(self, expr_node) -> None:
         condition_value = gt_utils.meta.ast_eval(expr_node, self.context, default=NOTHING)
         if condition_value is not NOTHING:
             if not condition_value:
+                source_lines = textwrap.dedent(self.source).split("\n")
                 loc = gt_ir.Location.from_ast_node(expr_node)
-                raise GTScriptAssertionError(
-                    "GTScript external_assert failed at '{scope}' (line: {line}, col: {col})".format(
-                        scope=loc.scope, line=loc.line, col=loc.column
-                    )
-                )
+                raise GTScriptAssertionError(source_lines[loc.line - 1], loc=loc)
         else:
             raise GTScriptSyntaxError(
                 "Evaluation of external_assert condition failed at the preprocessing step."
@@ -174,42 +172,31 @@ class OldAssertionChecker(ast.NodeTransformer):
         checker = cls(context, source)
         checker(func_node)
 
-    def __init__(self, context):
+    def __init__(self, context, source):
         self.context = context
+        self.source = source
 
-    def _process_assertion(self, expr_node) -> None:
-        condition_value = gt_utils.meta.ast_eval(expr_node, self.context, default=NOTHING)
+    def __call__(self, func_node: ast.FunctionDef):
+        self.visit(func_node)
+
+    def visit_Assert(self, assert_node: ast.Assert) -> None:
+        if assert_node.test.func.id != "__INLINED":
+            raise GTScriptSyntaxError("Run-time assertions are not supported.")
+        eval_node = assert_node.test.args[0]
+
+        condition_value = gt_utils.meta.ast_eval(eval_node, self.context, default=NOTHING)
         if condition_value is not NOTHING:
             if not condition_value:
-                loc = gt_ir.Location.from_ast_node(expr_node)
-                raise GTScriptAssertionError(
-                    "GTScript external_assert failed at '{scope}' (line: {line}, col: {col})".format(
-                        scope=loc.scope, line=loc.line, col=loc.column
-                    )
-                )
+                source_lines = textwrap.dedent(self.source).split("\n")
+                loc = gt_ir.Location.from_ast_node(assert_node)
+                raise GTScriptAssertionError(source_lines[loc.line - 1], loc=loc)
         else:
             raise GTScriptSyntaxError(
-                "Evaluation of external_assert condition failed at the preprocessing step."
+                "Evaluation of compile-time assertion condition failed at the preprocessing step."
             )
+
         return None
 
-    def _process_call(self, node: ast.Call) -> Optional[ast.Call]:
-        name = gt_meta.get_qualified_name_from_node(node.func)
-        if name != "external_assert":
-            return node
-        else:
-            if len(node.args) != 1:
-                raise GTScriptSyntaxError(
-                    "Invalid assertion. Correct syntax: external_assert(condition)"
-                )
-            return self._process_assertion(node.args[0])
-
-    def visit_Expr(self, node: ast.Expr) -> Optional[ast.AST]:
-        if isinstance(node.value, ast.Call):
-            ret = self._process_call(node.value)
-            return ast.Expr(value=ret) if ret else None
-        else:
-            return node
 
 
 class AxisIntervalParser(gt_meta.ASTPass):
