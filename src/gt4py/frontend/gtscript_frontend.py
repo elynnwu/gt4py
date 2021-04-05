@@ -166,6 +166,40 @@ class AssertionChecker(ast.NodeTransformer):
             return node
 
 
+class OldAssertionChecker(ast.NodeTransformer):
+    """Check assertions and remove from the AST for further parsing."""
+
+    @classmethod
+    def apply(cls, func_node: ast.FunctionDef, context: dict, source: str):
+        checker = cls(context, source)
+        checker(func_node)
+
+    def __init__(self, context, source):
+        self.context = context
+        self.source = source
+
+    def __call__(self, func_node: ast.FunctionDef):
+        self.visit(func_node)
+
+    def visit_Assert(self, assert_node: ast.Assert) -> None:
+        if assert_node.test.func.id != "__INLINED":
+            raise GTScriptSyntaxError("Run-time assertions are not supported.")
+        eval_node = assert_node.test.args[0]
+
+        condition_value = gt_utils.meta.ast_eval(eval_node, self.context, default=NOTHING)
+        if condition_value is not NOTHING:
+            if not condition_value:
+                source_lines = textwrap.dedent(self.source).split("\n")
+                loc = gt_ir.Location.from_ast_node(assert_node)
+                raise GTScriptAssertionError(source_lines[loc.line - 1], loc=loc)
+        else:
+            raise GTScriptSyntaxError(
+                "Evaluation of compile-time assertion condition failed at the preprocessing step."
+            )
+
+        return None
+
+
 class AxisIntervalParser(ast.NodeVisitor):
     """Parse Python AST interval syntax in the form of a Slice.
 
@@ -1671,6 +1705,7 @@ class GTScriptParser(ast.NodeVisitor):
         # Cleaner.apply(self.definition_ir)
 
         AssertionChecker.apply(main_func_node, context=local_context, source=self.source)
+        OldAssertionChecker.apply(main_func_node, context=local_context, source=self.source)
 
         # Generate definition IR
         domain = gt_ir.Domain.LatLonGrid()
