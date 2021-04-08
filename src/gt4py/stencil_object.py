@@ -243,7 +243,16 @@ class StencilObject(abc.ABC):
                 )
 
     def _call_run(
-        self, field_args, parameter_args, domain, origin, *, validate_args=True, exec_info=None
+        self,
+        field_args,
+        parameter_args,
+        domain,
+        origin,
+        *,
+        normalized_origin=None,
+        normalized_domain=None,
+        validate_args=True,
+        exec_info=None,
     ):
         """Check and preprocess the provided arguments (called by :class:`StencilObject` subclasses).
 
@@ -316,10 +325,13 @@ class StencilObject(abc.ABC):
                 raise ValueError(f"Parameter '{name}' is None.")
 
         # Origins
-        if origin is None:
-            origin = {}
+        if normalized_origin is not None:
+            origin = normalized_origin
         else:
-            origin = normalize_origin_mapping(origin)
+            if origin is None:
+                origin = {}
+            else:
+                origin = normalize_origin_mapping(origin)
 
         for name, field in used_field_args.items():
             if "_all_" in origin:
@@ -335,14 +347,17 @@ class StencilObject(abc.ABC):
                 origin.setdefault(name, gt_ir.Index(field.default_origin))
 
         # Domain
-        if domain is None:
-            domain = self._get_max_domain(used_field_args, origin)
-            if any(axis_bound == np.iinfo(np.uintc).max for axis_bound in domain):
-                raise ValueError(
-                    f"Compute domain could not be deduced. Specifiy the domain explicitly or ensure you reference at least one field."
-                )
+        if normalized_domain is not None:
+            domain = normalized_domain
         else:
-            domain = normalize_domain(domain)
+            if domain is None:
+                domain = self._get_max_domain(used_field_args, origin)
+                if any(axis_bound == np.iinfo(np.uintc).max for axis_bound in domain):
+                    raise ValueError(
+                        f"Compute domain could not be deduced. Specifiy the domain explicitly or ensure you reference at least one field."
+                    )
+            else:
+                domain = normalize_domain(domain)
 
         if validate_args:
             self._validate_args(used_field_args, used_param_args, domain, origin)
