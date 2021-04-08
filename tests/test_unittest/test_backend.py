@@ -22,7 +22,7 @@ from gt4py.backend import REGISTRY as backend_registry
 from gt4py.gtscript import __INLINED, PARALLEL, Field, computation, interval
 from gt4py.stencil_builder import StencilBuilder
 
-from ..definitions import ALL_BACKENDS, CPU_BACKENDS, DAWN_CPU_BACKENDS
+from ..definitions import ALL_BACKENDS, CPU_BACKENDS, DAWN_CPU_BACKENDS, GPU_BACKENDS
 
 
 def stencil_def(
@@ -109,22 +109,27 @@ def test_generate_pre_run(backend_name, mode):
             assert f"{key}.host_to_device()" not in source
 
 
-@pytest.mark.parametrize("backend_name", ALL_BACKENDS)
-@pytest.mark.parametrize("mode", (0, 1, 2))
-def test_generate_post_run(backend_name, mode):
+@pytest.mark.parametrize("backend_name", GPU_BACKENDS)
+@pytest.mark.parametrize("mode", (2,))
+@pytest.mark.parametrize("device_sync", (True, False))
+def test_device_sync_option(backend_name, mode, device_sync):
     backend_cls = backend_registry[backend_name]
     builder = StencilBuilder(stencil_def, backend=backend_cls).with_externals({"MODE": mode})
-    iir = builder.implementation_ir
-    args_data = backend_cls.make_args_data_from_iir(iir)
+    builder.options.backend_opts["device_sync"] = device_sync
+    args_data = backend_cls.make_args_data_from_iir(builder.implementation_ir)
 
     module_generator = backend_cls.MODULE_GENERATOR_CLASS()
-    module_generator.args_data = args_data
-    source = module_generator.generate_post_run()
+    source = module_generator(
+        args_data,
+        builder,
+        pyext_module_name=builder.module_name,
+        pyext_file_path=str(builder.module_path),
+    )
 
-    if backend_name in CPU_BACKENDS:
-        assert source == ""
+    if device_sync:
+        assert ".synchronize()" in source
     else:
-        assert source == "out._set_device_modified()"
+        assert ".synchronize()" not in source
 
 
 if __name__ == "__main__":
