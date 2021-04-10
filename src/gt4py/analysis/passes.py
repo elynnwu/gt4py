@@ -17,6 +17,7 @@
 """Definitions and utilities used by all the analysis pipeline components.
 """
 
+import copy
 import functools
 import itertools
 import warnings
@@ -24,6 +25,7 @@ from typing import (
     Any,
     Callable,
     Dict,
+    Generator,
     Iterable,
     Iterator,
     List,
@@ -49,6 +51,10 @@ from gt4py.analysis import (
     TransformPass,
 )
 from gt4py.definitions import Extent
+from gt4py.utils.attrib import Dict as DictOf
+from gt4py.utils.attrib import List as ListOf
+from gt4py.utils.attrib import Set as SetOf
+from gt4py.utils.attrib import attribclass, attribute
 
 
 MergeableType = TypeVar("MergeableType")
@@ -508,18 +514,73 @@ class NormalizeBlocksPass(TransformPass):
         transform_data.blocks = cls.SplitBlocksVisitor().visit(transform_data)
 
 
-class MultiStageMergingWrapper:
-    """Wrapper for :class:`DomainBlockInfo` containing the logic required to merge or not merge."""
+@attribclass
+class ComputationBlockInfo:
+    domain_blocks = attribute(of=ListOf[DomainBlockInfo])
+    inputs = attribute(of=DictOf[str, Extent], factory=dict)
+    outputs = attribute(of=SetOf[str], factory=set)
 
-    def __init__(self, multi_stage: DomainBlockInfo, parent: TransformData):
-        self._multi_stage = multi_stage
-        self._parent = parent
+
+class ComputationMergingWrapper:
+    def __init__(self, computation: ComputationBlockInfo, allocated_fields: Set[str]):
+        self._computation = computation
+        self._allocated_fields = allocated_fields
 
     @classmethod
     def wrap_items(
-        cls, items: Sequence[DomainBlockInfo], *, parent: TransformData
+        cls, items: Sequence[ComputationBlockInfo], *, allocated_fields: Set[str]
+    ) -> List["ComputationMergingWrapper"]:
+        return [cls(block, allocated_fields) for block in items]
+
+    def can_merge_with(self, candidate: "ComputationMergingWrapper") -> bool:
+        # Cannot merge if any allocated field that is an input to candidate is
+        # an output in self.
+
+        candidate_allocated_inputs = {
+            field
+            for field in candidate.computation.inputs
+            if field in candidate.allocated_fields
+            and not gt_definitions.Extent(candidate.computation.inputs[field][:-1]).is_zero
+        }
+        # Maybe only with offset?
+        self_allocated_outputs = {
+            field for field in self.computation.outputs if field in self.allocated_fields
+        }
+        return not candidate_allocated_inputs.intersection(self_allocated_outputs)
+
+    def merge_with(self, candidate: "ComputationMergingWrapper") -> None:
+        self.computation.domain_blocks.extend(candidate.computation.domain_blocks)
+        self.computation.inputs.update(candidate.computation.inputs)
+        self.computation.outputs.update(candidate.computation.outputs)
+
+    @property
+    def computation(self) -> ComputationBlockInfo:
+        return self._computation
+
+    @property
+    def allocated_fields(self) -> Set[str]:
+        return self._allocated_fields
+
+    @property
+    def wrapped(self) -> ComputationBlockInfo:
+        return self._computation
+
+
+class MultiStageMergingWrapper:
+    """Wrapper for :class:`DomainBlockInfo` containing the logic required to merge or not merge."""
+
+    def __init__(
+        self, multi_stage: DomainBlockInfo, parent: TransformData, allocated_fields: Set[str]
+    ):
+        self._multi_stage = multi_stage
+        self._parent = parent
+        self._allocated_fields = allocated_fields
+
+    @classmethod
+    def wrap_items(
+        cls, items: Sequence[DomainBlockInfo], *, parent: TransformData, allocated_fields: Set[str]
     ) -> List["MultiStageMergingWrapper"]:
-        return [cls(block, parent) for block in items]
+        return [cls(block, parent, allocated_fields) for block in items]
 
     def can_merge_with(self, candidate: "MultiStageMergingWrapper") -> bool:
         if self.parent != candidate.parent:
@@ -543,13 +604,14 @@ class MultiStageMergingWrapper:
 
     def has_disallowed_read_with_offset_and_write(self, target: "MultiStageMergingWrapper") -> bool:
         write_after_read_fields = {"all": self.write_after_read_fields_in(target)}
+
         write_after_read_fields["api"] = write_after_read_fields["all"].intersection(
-            self.api_fields_names
+            self.allocated_fields
         )
 
         read_after_write_fields = {"all": self.read_after_write_fields_in(target)}
         read_after_write_fields["api"] = read_after_write_fields["all"].intersection(
-            self.api_fields_names
+            self.allocated_fields
         )
 
         blocks_inputs = (
@@ -603,15 +665,15 @@ class MultiStageMergingWrapper:
         return self.domain.index(self.domain.sequential_axis)
 
     @property
-    def api_fields_names(self) -> List[str]:
-        return [decl.name for decl in self.parent.definition_ir.api_fields]
-
-    @property
     def k_offset_extends_domain(self) -> bool:
         return (
             self.iteration_order == gt_ir.IterationOrder.PARALLEL
             and self._parent.has_sequential_axis
         )
+
+    @property
+    def allocated_fields(self) -> Set[str]:
+        return self._allocated_fields
 
     @property
     def iteration_order(self) -> gt_ir.IterationOrder:
@@ -898,15 +960,96 @@ class MergeBlocksPass(TransformPass):
         return self._DEFAULT_OPTIONS
 
     @staticmethod
-    def apply(transform_data: TransformData) -> None:
-        merged_blocks = greedy_merging_with_wrapper(
-            transform_data.blocks, MultiStageMergingWrapper, parent=transform_data
-        )
-        for block in merged_blocks:
-            block.ij_blocks = greedy_merging_with_wrapper(
-                block.ij_blocks, StageMergingWrapper, parent=transform_data, parent_block=block
+    def merge_blocks(
+        transform_data: TransformData, allocated_fields: Set[str]
+    ) -> List[ComputationBlockInfo]:
+        blocks = [
+            ComputationBlockInfo(
+                domain_blocks=[copy.deepcopy(block)],
+                inputs=copy.deepcopy(block.inputs),
+                outputs=copy.deepcopy(block.outputs),
             )
-        transform_data.blocks = merged_blocks
+            for block in transform_data.blocks
+        ]
+
+        merged_blocks = greedy_merging_with_wrapper(
+            blocks,
+            ComputationMergingWrapper,
+            allocated_fields=allocated_fields,
+        )
+
+        for block in merged_blocks:
+            block.domain_blocks = greedy_merging_with_wrapper(
+                block.domain_blocks,
+                MultiStageMergingWrapper,
+                parent=transform_data,
+                allocated_fields=allocated_fields,
+            )
+            for dom_block in block.domain_blocks:
+                dom_block.ij_blocks = greedy_merging_with_wrapper(
+                    dom_block.ij_blocks,
+                    StageMergingWrapper,
+                    parent=transform_data,
+                    parent_block=dom_block,
+                )
+
+        return merged_blocks
+
+    @staticmethod
+    def statements_in_computation(
+        computation: ComputationBlockInfo,
+    ) -> Generator[StatementInfo, None, None]:
+        for dom_block in computation.domain_blocks:
+            for ij_block in dom_block.ij_blocks:
+                for int_block in ij_block.interval_blocks:
+                    yield from int_block.stmts
+
+    @classmethod
+    def detect_allocated_fields(
+        cls, transform_data: TransformData, comp_blocks: List[ComputationBlockInfo]
+    ) -> Set[str]:
+        allocated_fields = set()
+        last_write = {name: None for name in transform_data.symbols}
+
+        # Detect read before write in any computation block
+        for index, comp_block in enumerate(comp_blocks):
+            for statement_info in cls.statements_in_computation(comp_block):
+                # The order of the two for loops below matters!
+                for field in statement_info.inputs:
+                    allocated_last_write = last_write[field]
+                    if allocated_last_write is not None and allocated_last_write != index:
+                        allocated_fields.add(field)
+                for field in statement_info.outputs:
+                    last_write[field] = index
+
+        return allocated_fields
+
+    @classmethod
+    def apply(cls, transform_data: TransformData) -> None:
+        allocated_fields = {decl.name for decl in transform_data.definition_ir.api_fields}
+        for horizontal_if in gt_ir.filter_nodes_dfs(
+            transform_data.definition_ir, gt_ir.HorizontalIf
+        ):
+            allocated_fields |= {
+                ref.name for ref in gt_ir.filter_nodes_dfs(horizontal_if.body, gt_ir.FieldRef)
+            }
+
+        while True:
+            merged_blocks = cls.merge_blocks(transform_data, allocated_fields)
+            new_allocated_fields = cls.detect_allocated_fields(transform_data, merged_blocks)
+            if new_allocated_fields - allocated_fields:
+                allocated_fields |= new_allocated_fields
+            else:
+                break
+
+        for field in allocated_fields:
+            transform_data.symbols[field].decl.requires_sync = True
+
+        dom_blocks = []
+        for computation in merged_blocks:
+            dom_blocks.extend(computation.domain_blocks)
+
+        transform_data.blocks = dom_blocks
 
 
 def overlap_with_extent(
@@ -970,10 +1113,20 @@ class RemoveUnreachedStatementsPass(TransformPass):
                         stmt_infos.append(stmt_info)
                 int_block.stmts = stmt_infos
 
+    @staticmethod
+    def has_effect(dom_block: DomainBlockInfo) -> bool:
+        for ij_block in dom_block.ij_blocks:
+            for int_block in ij_block.interval_blocks:
+                if len(int_block.stmts) > 0:
+                    return True
+        return False
+
     @classmethod
     def apply(cls, transform_data: TransformData) -> None:
         for dom_block in transform_data.blocks:
             cls.filter_domain_block(dom_block)
+
+        transform_data.blocks = [block for block in transform_data.blocks if cls.has_effect(block)]
 
 
 class ComputeExtentsPass(TransformPass):
@@ -1269,16 +1422,14 @@ class BuildIIRPass(TransformPass):
         accessors = []
         remaining_outputs = set(ij_block.outputs)
         for name, extent in ij_block.inputs.items():
+            accessor = gt_ir.AccessIntent.READ
             if name in remaining_outputs:
-                read_write = True
+                accessor |= gt_ir.AccessIntent.WRITE
                 remaining_outputs.remove(name)
-                extent |= Extent.zeros()
-            else:
-                read_write = False
-            accessors.append(self._make_accessor(name, extent, read_write))
+            accessors.append(self._make_accessor(name, extent, accessor))
         zero_extent = Extent.zeros(self.data.ndims)
         for name in remaining_outputs:
-            accessors.append(self._make_accessor(name, zero_extent, True))
+            accessors.append(self._make_accessor(name, zero_extent, gt_ir.AccessIntent.WRITE))
 
         stage = gt_ir.Stage(
             name="stage__{}".format(ij_block.id),
@@ -1302,15 +1453,13 @@ class BuildIIRPass(TransformPass):
 
         return result
 
-    def _make_accessor(self, name, extent, read_write: bool) -> gt_ir.Accessor:
+    def _make_accessor(self, name, extent, accessor: gt_ir.AccessIntent) -> gt_ir.Accessor:
         assert name in self.data.symbols
-        intent = gt_ir.AccessIntent.READ_WRITE if read_write else gt_ir.AccessIntent.READ_ONLY
         if self.data.symbols[name].is_field:
             assert extent is not None
-            result = gt_ir.FieldAccessor(symbol=name, intent=intent, extent=extent)
+            result = gt_ir.FieldAccessor(symbol=name, intent=accessor, extent=extent)
         else:
-            # assert extent is None and not read_write
-            assert not read_write
+            assert accessor != gt_ir.AccessIntent.READ_WRITE
             result = gt_ir.ParameterAccessor(symbol=name)
 
         return result
@@ -1511,7 +1660,7 @@ class HousekeepingPass(TransformPass):
             self.generic_visit(path, node_name, node)
 
             if any(
-                isinstance(a, gt_ir.FieldAccessor) and (a.intent is gt_ir.AccessIntent.READ_WRITE)
+                isinstance(a, gt_ir.FieldAccessor) and bool(a.intent & gt_ir.AccessIntent.WRITE)
                 for a in node.accessors
             ):
                 return True, node
