@@ -15,20 +15,41 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 import abc
+import copy
 import functools
 import numbers
 import os
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Dict,
+    Generator,
+    List,
+    Optional,
+    OrderedDict,
+    Sequence,
+    Set,
+    Tuple,
+    Type,
+    Union,
+)
 
 import jinja2
 import numpy as np
 
+from gt4py import analysis as gt_analysis
 from gt4py import backend as gt_backend
 from gt4py import definitions as gt_definitions
 from gt4py import gt_src_manager
 from gt4py import ir as gt_ir
 from gt4py import utils as gt_utils
 from gt4py.utils import text as gt_text
+from gt4py.utils.attrib import Any as AnyT
+from gt4py.utils.attrib import Dict as DictOf
+from gt4py.utils.attrib import List as ListOf
+from gt4py.utils.attrib import Set as SetOf
+from gt4py.utils.attrib import attribkwclass as attribclass
+from gt4py.utils.attrib import attribute
 
 from . import pyext_builder
 
@@ -124,9 +145,49 @@ def cuda_is_compatible_type(field: Any) -> bool:
     return isinstance(field, (GPUStorage, ExplicitlySyncedGPUStorage))
 
 
-class LowerHorizontalIfPass(gt_ir.IRNodeMapper):
+class GTNode(gt_ir.IIRNode):
+    pass
+
+
+@attribclass
+class Computation(GTNode):
+    multistages = attribute(of=ListOf[gt_ir.MultiStage])
+    api_fields = attribute(of=SetOf[str])
+    parameters = attribute(of=SetOf[str])
+    arg_fields = attribute(of=SetOf[str])
+    tmp_fields = attribute(of=DictOf[str, gt_ir.FieldDecl])
+
+
+@attribclass
+class GTStencil(GTNode):
+    name = attribute(of=str)
+    domain = attribute(of=gt_ir.Domain)
+    computations = attribute(of=ListOf[Computation])
+    api_signature = attribute(of=ListOf[gt_ir.ArgumentInfo])
+    fields = attribute(of=DictOf[str, gt_ir.FieldDecl])  # api and arg decls
+    parameters = attribute(of=DictOf[str, gt_ir.VarDecl])
+    fields_extents = attribute(of=DictOf[str, gt_ir.Extent])
+    unreferenced = attribute(of=ListOf[str], factory=list)
+    externals = attribute(of=DictOf[str, AnyT], optional=True)
+
+    @property
+    def has_effect(self):
+        """
+        Determine whether the stencil modifies any of its arguments.
+
+        Note that the only guarantee of this function is that the stencil has no effect if it returns ``false``. It
+        might however return true in cases where the optimization passes were not able to deduce this.
+        """
+        for computation in self.computations:
+            if any(field not in self.unreferenced for field in computation.api_fields):
+                return True
+
+
+class LowerHorizontalIf(gt_ir.IRNodeMapper):
+    """Replaces gt_ir.HorizontalIf with gt_ir.If, gt_ir.AxisOffset, gt_ir.AxisIndex."""
+
     @classmethod
-    def apply(cls, impl_node: gt_ir.StencilImplementation) -> None:
+    def apply(cls, impl_node: GTStencil) -> None:
         cls(impl_node.domain).visit(impl_node)
 
     def __init__(self, domain: gt_ir.Domain):
@@ -203,6 +264,270 @@ class LowerHorizontalIfPass(gt_ir.IRNodeMapper):
             )
         else:
             return True, node.body
+
+
+class LowerToGTStencil(gt_ir.IRNodeMapper):
+    """Lower StencilImplementation to a GTStencil.
+
+    1. Place each MultiStage into its own Computation
+    2. Fill arg_fields with fields used inside HorizontalIf nodes
+
+    The IR will be invalid after this mostly naive lowering. To become valid,
+    it will need the remainder of the passes in :func:`impl_to_gtstencil`.
+    """
+
+    @classmethod
+    def apply(cls, impl_node: gt_ir.StencilImplementation, allocated_fields: Set[str]) -> None:
+        return cls(impl_node, allocated_fields).visit(impl_node)
+
+    def __init__(self, impl_node: gt_ir.StencilImplementation, allocated_fields: Set[str]):
+        self.impl_node = impl_node
+        self.allocated_fields = allocated_fields
+
+    def __call__(self, impl_node: gt_ir.StencilImplementation):
+        return self.visit(impl_node)
+
+    @staticmethod
+    def stages_in_multistage(multi_stage: gt_ir.MultiStage) -> Generator[gt_ir.Stage, None, None]:
+        for group in multi_stage.groups:
+            yield from group.stages
+
+    def visit_MultiStage(self, path: tuple, node_name: str, node: gt_ir.MultiStage) -> Computation:
+        api_signature_names = [arg.name for arg in self.impl_node.api_signature]
+
+        api_fields = set()
+        arg_fields = set()
+        parameters = set()
+        tmp_fields = dict()
+        for stage in self.stages_in_multistage(node):
+            api_fields.update(
+                {
+                    accessor.symbol
+                    for accessor in stage.accessors
+                    if isinstance(accessor, gt_ir.FieldAccessor)
+                    and accessor.symbol in api_signature_names
+                }
+            )
+            arg_fields.update(
+                {
+                    accessor.symbol
+                    for accessor in stage.accessors
+                    if isinstance(accessor, gt_ir.FieldAccessor)
+                    and accessor.symbol in self.allocated_fields
+                    and accessor.symbol not in api_signature_names
+                }
+            )
+            parameters.update(
+                {
+                    accessor.symbol
+                    for accessor in stage.accessors
+                    if isinstance(accessor, gt_ir.ParameterAccessor)
+                }
+            )
+            tmp_names = {
+                accessor.symbol
+                for accessor in stage.accessors
+                if isinstance(accessor, gt_ir.FieldAccessor)
+                and accessor.symbol not in api_signature_names
+                and accessor.symbol not in self.allocated_fields
+            }
+            tmp_fields.update({name: self.impl_node.fields[name] for name in tmp_names})
+
+        return True, Computation(
+            multistages=[node],
+            api_fields=api_fields,
+            arg_fields=arg_fields,
+            parameters=parameters,
+            tmp_fields=tmp_fields,
+        )
+
+    def visit_StencilImplementation(
+        self, path: tuple, node_name: str, node: gt_ir.StencilImplementation
+    ) -> GTStencil:
+        computations = [self.visit(multi_stage) for multi_stage in node.multi_stages]
+
+        tmp_fields = set().union(*(computation.tmp_fields for computation in computations))
+        api_and_arg_fields = {
+            name: decl for name, decl in node.fields.items() if name not in tmp_fields
+        }
+
+        return True, GTStencil(
+            name=node.name,
+            domain=node.domain,
+            computations=computations,
+            api_signature=node.api_signature,
+            fields=api_and_arg_fields,
+            parameters=node.parameters,
+            fields_extents=node.fields_extents,
+            unreferenced=node.unreferenced,
+            externals=node.externals,
+        )
+
+
+class ComputationMergingWrapper:
+    def __init__(self, computation: Computation):
+        self._computation = computation
+
+    @classmethod
+    def wrap_items(
+        cls,
+        items: Sequence[Computation],
+    ) -> List["ComputationMergingWrapper"]:
+        return [cls(block) for block in items]
+
+    def can_merge_with(self, candidate: "ComputationMergingWrapper") -> bool:
+        candidate_allocated_inputs = {
+            field
+            for field in candidate.field_accessors_with_intent(
+                gt_ir.AccessIntent.READ, has_nonzero_parallel_extent=True
+            )
+            if field in candidate.arg_fields | candidate.api_fields
+        }
+
+        self_allocated_outputs = {
+            field
+            for field in self.field_accessors_with_intent(gt_ir.AccessIntent.WRITE)
+            if field in self.arg_fields | self.api_fields
+        }
+        return not candidate_allocated_inputs.intersection(self_allocated_outputs)
+
+    def merge_with(self, candidate: "ComputationMergingWrapper") -> None:
+        self.computation.multistages.extend(candidate.computation.multistages)
+        self.computation.api_fields.update(candidate.computation.api_fields)
+        self.computation.arg_fields.update(candidate.computation.arg_fields)
+        self.computation.parameters.update(candidate.computation.parameters)
+        self.computation.tmp_fields.update(candidate.computation.tmp_fields)
+
+    @property
+    def stages(self) -> Generator[gt_ir.Stage, None, None]:
+        for multistage in self.computation.multistages:
+            for group in multistage.groups:
+                yield from group.stages
+
+    def field_accessors_with_intent(self, intent, has_nonzero_parallel_extent=False):
+        fields = set()
+        for stage in self.stages:
+            fields |= {
+                accessor.symbol
+                for accessor in stage.accessors
+                if isinstance(accessor, gt_ir.FieldAccessor)
+                and bool(accessor.intent & intent)
+                and (
+                    not has_nonzero_parallel_extent
+                    or not gt_definitions.Extent(accessor.extent[:-1]).is_zero
+                )
+            }
+        return fields
+
+    @property
+    def computation(self) -> Computation:
+        return self._computation
+
+    @property
+    def arg_fields(self) -> Set[str]:
+        return self.computation.arg_fields
+
+    @property
+    def api_fields(self) -> Set[str]:
+        return self.computation.api_fields
+
+    @property
+    def wrapped(self) -> Computation:
+        return self._computation
+
+
+class UpdateArgFields:
+    @property
+    def stages_with_computation_index(self) -> Generator[gt_ir.Stage, None, None]:
+        for comp_index, computation in enumerate(self.computations):
+            yield from (
+                (comp_index, stage)
+                for multistage in computation.multistages
+                for group in multistage.groups
+                for stage in group.stages
+            )
+
+    @property
+    def computations(self) -> Generator[Computation, None, None]:
+        return self.gtstencil.computations
+
+    @property
+    def gtstencil(self) -> GTStencil:
+        return self._gtstencil
+
+    def __init__(self, gtstencil: GTStencil):
+        self._gtstencil = gtstencil
+
+    def __call__(self):
+        # Collect set of all arg_fields to propagate to all computations
+        promote_to_arg_fields = set().union(
+            *(comp.arg_fields for comp in self.gtstencil.computations)
+        )
+        field_to_last_write_loc = {}
+
+        # Promote temporaries that are READ before any WRITE in the same computation.
+        # Also, READ in another computation than WRITE.
+        for comp_index, stage in self.stages_with_computation_index:
+            computation_tmp_fields = self.gtstencil.computations[comp_index].tmp_fields
+            for symbol in {
+                accessor.symbol
+                for accessor in stage.accessors
+                if isinstance(accessor, gt_ir.FieldAccessor)
+                and bool(accessor.intent & gt_ir.AccessIntent.READ)
+                and accessor.symbol in computation_tmp_fields
+            }:
+                last_write_comp = field_to_last_write_loc.get(symbol, None)
+                if last_write_comp is not None and last_write_comp != comp_index:
+                    promote_to_arg_fields.add(symbol)
+
+            for symbol in {
+                accessor.symbol
+                for accessor in stage.accessors
+                if isinstance(accessor, gt_ir.FieldAccessor)
+                and bool(accessor.intent & gt_ir.AccessIntent.WRITE)
+            }:
+                field_to_last_write_loc[symbol] = comp_index
+
+        # In each computation, move requested fields from temporaries to arg_fields
+        for computation in self.gtstencil.computations:
+            to_move = {
+                tmp: value
+                for tmp, value in computation.tmp_fields.items()
+                if tmp in promote_to_arg_fields
+            }
+            computation.arg_fields.update(to_move.keys())
+            # Add FieldDecl value to gtstencil.fields
+            self.gtstencil.fields.update(to_move)
+            for tmp in to_move:
+                del computation.tmp_fields[tmp]
+
+    @classmethod
+    def apply(cls, gtstencil: GTStencil):
+        cls(gtstencil)()
+
+
+def impl_to_gtstencil(impl_node: gt_ir.StencilImplementation) -> GTStencil:
+    allocated_fields = {
+        name
+        for name, decl in impl_node.fields.items()
+        if isinstance(decl, gt_ir.FieldDecl) and decl.requires_sync
+    }
+
+    # Trivially lower StencilImplementation to GTStencil
+    gtstencil = LowerToGTStencil.apply(copy.deepcopy(impl_node), allocated_fields)
+
+    # Merge computations as possible
+    gtstencil.computations = gt_analysis.passes.greedy_merging_with_wrapper(
+        gtstencil.computations, ComputationMergingWrapper
+    )
+
+    # Convert HorizontalIf -> If
+    LowerHorizontalIf.apply(gtstencil)
+
+    # Propagate arg_fields across computations and promote temporaries as needed
+    UpdateArgFields.apply(gtstencil)
+
+    return gtstencil
 
 
 class _MaxKOffsetExtractor(gt_ir.IRNodeVisitor):
@@ -323,7 +648,8 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
         self.domain = impl_node.domain
         self.k_splitters: List[Tuple[str, int]] = []
 
-        source = self.visit(impl_node)
+        gtstencil = impl_to_gtstencil(self.impl_node)
+        source = self.visit(gtstencil)
 
         return source
 
@@ -514,7 +840,7 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
 
         return interval_definition, body_sources.text
 
-    def visit_Stage(self, node: gt_ir.Stage) -> Dict[str, Any]:
+    def visit_Stage(self, node: gt_ir.Stage):
         # Initialize symbols for the generation of references in this stage
         self.stage_symbols = {}
         args = []
@@ -522,9 +848,8 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
             self.stage_symbols[accessor.symbol] = accessor
             arg = {"name": accessor.symbol, "access_type": "in", "extent": None}
             if isinstance(accessor, gt_ir.FieldAccessor):
-                arg["access_type"] = (
-                    "in" if accessor.intent == gt_ir.AccessIntent.READ_ONLY else "inout"
-                )
+                # Both WRITE and READ_WRITE map to "inout"
+                arg["access_type"] = "in" if accessor.intent == gt_ir.AccessIntent.READ else "inout"
                 arg["extent"] = gt_utils.flatten(accessor.extent)
             args.append(arg)
 
@@ -547,50 +872,98 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
                     "body": body_sources,
                 }
             )
-        functor_content = {"args": args, "regions": regions}
+
+        extents = gt_utils.flatten(node.compute_extent)
+        functor_content = {
+            "args": args,
+            "regions": regions,
+            "extents": extents,
+        }
 
         return functor_content
 
-    def visit_StencilImplementation(
-        self, node: gt_ir.StencilImplementation
-    ) -> Dict[str, Dict[str, str]]:
-        offset_limit = _extract_max_k_offset(node)
-        k_axis = {"n_intervals": 1, "offset_limit": offset_limit}
-        max_extent = functools.reduce(
-            lambda a, b: a | b, node.fields_extents.values(), gt_definitions.Extent.zeros()
-        )
-        halo_sizes = tuple(max(lower, upper) for lower, upper in max_extent.to_boundary())
-        constants = {}
-        if node.externals:
-            for name, value in node.externals.items():
-                value = self._make_cpp_value(name)
-                if value is not None:
-                    constants[name] = value
+    def visit_MultiStage(self, node: gt_ir.MultiStage) -> Dict[str, Any]:
+        steps = [[stage.name for stage in group.stages] for group in node.groups]
+        stage_functors = {
+            stage.name: self.visit(stage)
+            for stage in (stage for group in node.groups for stage in group.stages)
+        }
+        return {
+            "exec": self.ITERATION_ORDER_TO_GT_ORDER[node.iteration_order],
+            "steps": steps,
+            "stage_functors": stage_functors,
+        }
 
+    def visit_Computation(self, node: Computation) -> Dict[str, Any]:
+        multistages = [self.visit(multistage) for multistage in node.multistages]
+        requires_positional = len(tuple(gt_ir.filter_nodes_dfs(node, gt_ir.AxisIndex))) > 0
+
+        stage_functors = {}
+        for multistage in multistages:
+            stage_functors.update(multistage["stage_functors"])
+
+        return {
+            "multistages": multistages,
+            "requires_positional": requires_positional,
+            "api_fields": node.api_fields,
+            "arg_fields": node.arg_fields,
+            "parameters": node.parameters,
+            "stage_functors": stage_functors,
+        }
+
+    def _make_field_attributes(self, field_decl: gt_ir.FieldDecl) -> Dict[str, str]:
+        return {
+            "name": field_decl.name,
+            "dtype": self._make_cpp_type(field_decl.data_type),
+            "naxes": len(field_decl.axes),
+            "axes": field_decl.axes,
+            "selector": tuple(axis in field_decl.axes for axis in self.impl_node.domain.axes_names),
+        }
+
+    def _collect_field_arguments(self, gtstencil: GTStencil) -> List[Dict[str, str]]:
+        api_fields = []
         arg_fields = []
-        tmp_fields = []
-        storage_ids = []
-        max_ndim = 0
-        for name, field_decl in node.fields.items():
-            if name not in node.unreferenced:
-                max_ndim = max(max_ndim, len(field_decl.axes))
-                field_attributes = {
-                    "name": field_decl.name,
-                    "dtype": self._make_cpp_type(field_decl.data_type),
-                    "naxes": len(field_decl.axes),
-                    "axes": field_decl.axes,
-                    "selector": tuple(
-                        axis in field_decl.axes for axis in self.impl_node.domain.axes_names
-                    ),
-                }
-                if field_decl.is_api:
-                    if field_decl.layout_id not in storage_ids:
-                        storage_ids.append(field_decl.layout_id)
-                    field_attributes["layout_id"] = storage_ids.index(field_decl.layout_id)
-                    arg_fields.append(field_attributes)
+
+        for name in [
+            arg.name
+            for arg in gtstencil.api_signature
+            if arg.name in gtstencil.fields and arg.name not in gtstencil.unreferenced
+        ]:
+            field_decl = gtstencil.fields[name]
+            field_attributes = self._make_field_attributes(field_decl)
+            api_fields.append(field_attributes)
+
+        api_names = {arg.name for arg in gtstencil.api_signature}
+        # These are sorted so that they are in a stable order
+        arg_names = sorted([name for name in gtstencil.fields if name not in api_names])
+
+        for name in arg_names:
+            field_decl = gtstencil.fields[name]
+            field_attributes = self._make_field_attributes(field_decl)
+            arg_fields.append(field_attributes)
+
+        return api_fields + arg_fields
+
+    def visit_GTStencil(self, node: GTStencil) -> Dict[str, Dict[str, str]]:
+        computations = [self.visit(computation) for computation in node.computations]
+
+        # allocated_fields are both api and arg fields
+        allocated_fields = self._collect_field_arguments(node)
+
+        # All temporaries become gt::tmp_arg at the top level
+        tmp_fields = OrderedDict()
+        for computation in node.computations:
+            for name in sorted(computation.tmp_fields.keys()):
+                field_decl = computation.tmp_fields[name]
+                dtype = self._make_cpp_type(field_decl.data_type)
+                if name not in tmp_fields:
+                    tmp_fields[name] = {"name": name, "dtype": dtype}
                 else:
-                    tmp_fields.append(field_attributes)
-        tmp_fields = list(sorted(tmp_fields, key=lambda field: field["name"]))
+                    existing_dtype = tmp_fields[name]["dtype"]
+                    if dtype != existing_dtype:
+                        raise TypeError(
+                            f"Temporary {name} has conflicting dtypes: {existing_dtype} and {dtype}"
+                        )
 
         parameters = [
             {"name": parameter.name, "dtype": self._make_cpp_type(parameter.data_type)}
@@ -598,46 +971,40 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
             if name not in node.unreferenced
         ]
 
-        requires_positional = len(tuple(gt_ir.filter_nodes_dfs(node, gt_ir.AxisIndex))) > 0
-        stage_extents = {}
-        stage_functors = {}
-        for multi_stage in node.multi_stages:
-            for group in multi_stage.groups:
-                for stage in group.stages:
-                    compute_extent = stage.compute_extent
-                    extents: List[int] = []
-                    for i in range(compute_extent.ndims - 1):
-                        extents.extend(
-                            (compute_extent.lower_indices[i], compute_extent.upper_indices[i])
-                        )
-                    stage_extents[stage.name] = ", ".join([str(extent) for extent in extents])
-                    stage_functors[stage.name] = self.visit(stage)
+        offset_limit = _extract_max_k_offset(node)
+        k_axis = {"n_intervals": 1, "offset_limit": offset_limit}
 
-        multi_stages = []
-        for multi_stage in node.multi_stages:
-            steps = [[stage.name for stage in group.stages] for group in multi_stage.groups]
-            ordering = self.ITERATION_ORDER_TO_GT_ORDER[multi_stage.iteration_order]
-            multi_stages.append(
-                {
-                    "exec": ordering,
-                    "steps": steps,
-                }
-            )
+        max_extent = functools.reduce(
+            lambda a, b: a | b, node.fields_extents.values(), gt_definitions.Extent.zeros()
+        )
+        halo_sizes = tuple(max(lower, upper) for lower, upper in max_extent.to_boundary())
+
+        constants = {}
+        if node.externals:
+            for name, value in node.externals.items():
+                value = self._make_cpp_value(name)
+                if value is not None:
+                    constants[name] = value
+
+        any_positional = any(computation["requires_positional"] for computation in computations)
+
+        stage_functors = {}
+        for computation in computations:
+            stage_functors.update(computation["stage_functors"])
 
         template_args = dict(
-            arg_fields=arg_fields,
-            constants=constants,
-            gt_backend=self.gt_backend_t,
+            allocated_fields=allocated_fields,
+            tmp_fields=tuple(tmp_fields.values()),
             halo_sizes=halo_sizes,
+            constants=constants,
+            stage_functors=stage_functors,
+            gt_backend=self.gt_backend_t,
+            parameters=parameters,
             k_axis=k_axis,
             module_name=self.module_name,
-            requires_positional=requires_positional,
-            multi_stages=multi_stages,
-            parameters=parameters,
-            stage_functors=stage_functors,
-            stage_extents=stage_extents,
+            computations=computations,
+            any_positional=any_positional,
             stencil_unique_name=self.class_name,
-            tmp_fields=tmp_fields,
         )
 
         sources: Dict[str, Dict[str, str]] = {"computation": {}, "bindings": {}}
@@ -648,6 +1015,83 @@ class GTPyExtGenerator(gt_ir.IRNodeVisitor):
                 sources["bindings"][key] = template.render(**template_args)
 
         return sources
+
+
+class GTPyModuleGenerator(gt_backend.PyExtModuleGenerator):
+    def generate_imports(self) -> str:
+        return (
+            """
+from gt4py import storage as gt_storage
+        """
+            + super().generate_imports()
+        )
+
+    def generate_implementation(self) -> str:
+        gtstencil = impl_to_gtstencil(self.builder.implementation_ir)
+        sources = gt_utils.text.TextBlock(indent_size=self.TEMPLATE_INDENT_SIZE)
+
+        api_field_names = {
+            arg.name for arg in gtstencil.api_signature if arg.name in gtstencil.fields
+        }
+        # These are sorted so that they are in a stable order
+        # Note that this must match the ordering in _collect_field_arguments
+        arg_field_names = sorted([name for name in gtstencil.fields if name not in api_field_names])
+
+        api_field_args = []
+        parameter_args = []
+        # Assumption used below that parameteters always follow fields in the API signature,
+        # because GridTools asserts this.
+        for arg in gtstencil.api_signature:
+            if arg.name not in self.args_data["unreferenced"]:
+                if arg.name in api_field_names:
+                    api_field_args.append(arg.name)
+                    api_field_args.append("list(_origin_['{}'])".format(arg.name))
+                else:
+                    parameter_args.append(arg.name)
+
+        allocations = []
+        tmp_field_args = []
+        for name in arg_field_names:
+            upper_indices = self.builder.implementation_ir.fields_extents[name].upper_indices
+            lower_indices = self.builder.implementation_ir.fields_extents[name].lower_indices
+            dtype = gtstencil.fields[name].data_type.dtype
+            origin_values = [max(0, -x) for x in lower_indices]
+            shape_adds = [upper - lower for upper, lower in zip(upper_indices, lower_indices)]
+            shape = (
+                "["
+                + ", ".join([f"_domain_[{i}] + {shape_adds[i]}" for i in range(len(shape_adds))])
+                + "]"
+            )
+            origin_str = "[" + ", ".join([str(x) for x in origin_values]) + "]"
+            allocations.append(
+                f'storage_{name} = gt_storage.empty("{self.builder.backend.name}", default_origin={origin_str}, shape={shape}, dtype=np.{dtype})'
+            )
+            tmp_field_args.append(f"storage_{name}")
+            tmp_field_args.append(origin_str)
+
+        # Field args must precede parameter args
+        args = api_field_args
+        args.extend(tmp_field_args)
+        args.extend(parameter_args)
+
+        # only generate implementation if any multi_stages are present. e.g. if no statement in the
+        # stencil has any effect on the API fields, this may not be the case since they could be
+        # pruned.
+
+        if self.builder.implementation_ir.has_effect:
+            source = """
+{allocations}
+# Load or generate a GTComputation object for the current domain size
+pyext_module.run_computation(list(_domain_), {run_args}, exec_info)
+""".format(
+                allocations="\n".join(allocations),
+                run_args=", ".join(args),
+            )
+            sources.extend(source.splitlines())
+        else:
+            sources.append("")
+
+        return sources.text
 
 
 class BaseGTBackend(gt_backend.BasePyExtBackend, gt_backend.CLIBackendMixin):
@@ -661,7 +1105,7 @@ class BaseGTBackend(gt_backend.BasePyExtBackend, gt_backend.CLIBackendMixin):
 
     GT_BACKEND_T: str
 
-    MODULE_GENERATOR_CLASS = gt_backend.PyExtModuleGenerator
+    MODULE_GENERATOR_CLASS = GTPyModuleGenerator
 
     PYEXT_GENERATOR_CLASS = GTPyExtGenerator
 
@@ -669,9 +1113,6 @@ class BaseGTBackend(gt_backend.BasePyExtBackend, gt_backend.CLIBackendMixin):
         self.check_options(self.builder.options)
 
         implementation_ir = self.builder.implementation_ir
-
-        # Lower HorizontalIf to If
-        LowerHorizontalIfPass.apply(self.builder.implementation_ir)
 
         # Generate the Python binary extension (checking if GridTools sources are installed)
         if not gt_src_manager.has_gt_sources() and not gt_src_manager.install_gt_sources():
@@ -813,7 +1254,25 @@ class GTMCBackend(BaseGTBackend):
         return self.make_extension(uses_cuda=False)
 
 
-class GTCUDAPyModuleGenerator(gt_backend.CUDAPyExtModuleGenerator):
+class GTCUDAPyModuleGenerator(GTPyModuleGenerator):
+    def generate_implementation(self) -> str:
+        source = (
+            super().generate_implementation()
+            + """
+cupy.cuda.Device(0).synchronize()
+    """
+        )
+        return source
+
+    def generate_imports(self) -> str:
+        source = (
+            """
+import cupy
+"""
+            + super().generate_imports()
+        )
+        return source
+
     def generate_pre_run(self) -> str:
         field_names = [
             key
