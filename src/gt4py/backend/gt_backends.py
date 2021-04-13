@@ -378,9 +378,7 @@ class ComputationMergingWrapper:
     def can_merge_with(self, candidate: "ComputationMergingWrapper") -> bool:
         candidate_allocated_inputs = {
             field
-            for field in candidate.field_accessors_with_intent(
-                gt_ir.AccessIntent.READ, has_nonzero_parallel_extent=True
-            )
+            for field in candidate.field_accessors_with_intent(gt_ir.AccessIntent.READ)
             if field in candidate.arg_fields | candidate.api_fields
         }
 
@@ -404,18 +402,13 @@ class ComputationMergingWrapper:
             for group in multistage.groups:
                 yield from group.stages
 
-    def field_accessors_with_intent(self, intent, has_nonzero_parallel_extent=False):
+    def field_accessors_with_intent(self, intent):
         fields = set()
         for stage in self.stages:
             fields |= {
                 accessor.symbol
                 for accessor in stage.accessors
-                if isinstance(accessor, gt_ir.FieldAccessor)
-                and bool(accessor.intent & intent)
-                and (
-                    not has_nonzero_parallel_extent
-                    or not gt_definitions.Extent(accessor.extent[:-1]).is_zero
-                )
+                if isinstance(accessor, gt_ir.FieldAccessor) and bool(accessor.intent & intent)
             }
         return fields
 
