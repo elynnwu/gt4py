@@ -537,10 +537,7 @@ class ComputationMergingWrapper:
         # an output in self.
 
         candidate_allocated_inputs = {
-            field
-            for field in candidate.computation.inputs
-            if field in candidate.allocated_fields
-            and not gt_definitions.Extent(candidate.computation.inputs[field][:-1]).is_zero
+            field for field in candidate.computation.inputs if field in candidate.allocated_fields
         }
         # Maybe only with offset?
         self_allocated_outputs = {
@@ -1038,7 +1035,7 @@ class MergeBlocksPass(TransformPass):
             merged_blocks = cls.merge_blocks(transform_data, allocated_fields)
             new_allocated_fields = cls.detect_allocated_fields(transform_data, merged_blocks)
             if new_allocated_fields - allocated_fields:
-                allocated_fields |= new_allocated_fields
+                allocated_fields = new_allocated_fields
             else:
                 break
 
