@@ -22,7 +22,7 @@ import itertools
 import numbers
 import textwrap
 import types
-from typing import Dict, List, Optional, Tuple, Union, Dict
+from typing import Dict, List, Optional, Tuple, Union, Dict, Any
 
 import numpy as np
 
