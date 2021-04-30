@@ -1347,6 +1347,117 @@ class BuildIIRPass(TransformPass):
         return result
 
 
+class RenameTemporariesPass(TransformPass):
+    """Rename reused temporaries to increase the number that can be scalarized."""
+
+    class CollectRenamables(gt_ir.IRNodeVisitor):
+        @classmethod
+        def apply(cls, node: gt_ir.StencilImplementation) -> Set[str]:
+            collector = cls()
+            return collector(node)
+
+        def __call__(self, node: gt_ir.StencilImplementation) -> Set[str]:
+            assert isinstance(node, gt_ir.StencilImplementation)
+            self.renamables: Dict[str, Optional[str]] = {
+                temp_field: dict(write_stages=[], read_stages=[]) for temp_field in node.temporary_fields
+            }
+            """Dictionary mapping temporaries to their most recently referenced stage."""
+            self.visit(node)
+
+            return set(self.renamables.keys())
+
+        def visit_Stage(self, node: gt_ir.Stage, **kwargs: Any) -> None:
+            self.generic_visit(node, **kwargs, stage_name=node.name, is_write=False)
+
+        def visit_Assign(self, node: gt_ir.Assign, **kwargs: Any) -> None:
+            kwargs["is_write"] = False
+            self.visit(node.value, **kwargs)
+            kwargs["is_write"] = True
+            self.visit(node.target, **kwargs)
+
+        def visit_HorizontalIf(self, node: gt_ir.HorizontalIf, **kwargs) -> None:
+            self.visit(node.body, inside_horizontal_if=True, **kwargs)
+
+        def visit_FieldRef(self, node: gt_ir.FieldRef, **kwargs: Any) -> None:
+            is_pointwise = all(val == 0 for val in node.offset.values())
+            in_horizontal_if = kwargs.get("inside_horizontal_if", False)
+            if node.name in self.renamables and is_pointwise and not in_horizontal_if:
+                stage_name = kwargs["stage_name"]
+                if kwargs.get("is_write", False):
+                    self.renamables[node.name]["read_stages"].append(stage_name)
+                else:
+                    self.renamables[node.name]["write_stages"].append(stage_name)
+
+    class RenameSymbols(gt_ir.IRNodeMapper):
+        @classmethod
+        def apply(cls, node: gt_ir.StencilImplementation, renamables: Set[str]) -> None:
+            instance = cls(renamables)
+            return instance(node)
+
+        def __init__(self, renamables):
+            self.renamables = renamables
+            self.local_symbols = None
+
+        def __call__(self, node: gt_ir.StencilImplementation) -> gt_ir.StencilImplementation:
+            assert isinstance(node, gt_ir.StencilImplementation)
+            self.fields = node.fields
+            node = self.visit(node)
+            return node
+
+        def visit_FieldAccessor(
+            self, path: tuple, node_name: str, node: gt_ir.FieldAccessor
+        ) -> Tuple[bool, Optional[gt_ir.FieldAccessor]]:
+            if node.symbol in self.renamables:
+                return False, None
+            else:
+                return True, node
+
+        def visit_StencilImplementation(
+            self, path: tuple, node_name: str, node: gt_ir.StencilImplementation
+        ) -> gt_ir.StencilImplementation:
+            self.iir = node
+            res = self.generic_visit(path, node_name, node)
+            for f in self.renamables:
+                assert f in node.temporary_fields, "Tried to demote api field to variable."
+                node.fields.pop(f)
+                node.fields_extents.pop(f)
+            return res
+
+        def visit_ApplyBlock(
+            self, path: tuple, node_name: str, node: gt_ir.ApplyBlock
+        ) -> Tuple[bool, gt_ir.ApplyBlock]:
+            self.local_symbols = {}
+
+            self.generic_visit(path, node_name, node)
+
+            node.local_symbols.update(self.local_symbols)
+            self.local_symbols = None
+            return True, node
+
+        def visit_FieldRef(
+            self, path: tuple, node_name: str, node: gt_ir.FieldRef
+        ) -> Tuple[bool, Union[gt_ir.FieldRef, gt_ir.VarRef]]:
+            if node.name in self.renamables:
+                if node.name not in self.local_symbols:
+                    field_decl = self.fields[node.name]
+                    self.local_symbols[node.name] = gt_ir.VarDecl(
+                        name=node.name,
+                        data_type=field_decl.data_type,
+                        length=1,
+                        is_api=False,
+                        loc=field_decl.loc,
+                    )
+                return True, gt_ir.VarRef(name=node.name, index=0, loc=node.loc)
+
+            else:
+                return True, node
+
+    @classmethod
+    def apply(cls, transform_data: TransformData) -> None:
+        renamables = cls.CollectRenamables.apply(transform_data.implementation_ir)
+        cls.RenameSymbols.apply(transform_data.implementation_ir, renamables)
+
+
 class DemoteLocalTemporariesToVariablesPass(TransformPass):
     """Demote symbols only used within a single stage to scalars.
 

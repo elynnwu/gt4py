@@ -31,8 +31,9 @@ from .passes import (
     InitInfoPass,
     MergeBlocksPass,
     NormalizeBlocksPass,
-    RemoveUnreachedStatementsPass,
     ReduceTemporaryStoragesPass,
+    RemoveUnreachedStatementsPass,
+    RenameTemporariesPass,
 )
 
 
@@ -110,6 +111,9 @@ class IRTransformer:
 
         # Fill in missing dtypes
         DataTypePass.apply(self.transform_data)
+
+        # Rename temporaries
+        RenameTemporariesPass.apply(self.transform_data)
 
         # turn temporary fields that are only written and read within the same function
         # into local scalars
