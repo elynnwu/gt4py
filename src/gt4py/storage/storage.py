@@ -249,6 +249,8 @@ class Storage(np.ndarray):
 
 
 class GPUStorage(Storage):
+    _modified_storages: dict = {}
+
     @classmethod
     def _construct(cls, backend, dtype, default_origin, shape, alignment, layout_map):
 
@@ -287,18 +289,22 @@ class GPUStorage(Storage):
     def gpu_view(self):
         return storage_utils.gpu_view(self)
 
+    def __getitem__(self, item):
+        self.device_to_host()
+        return super().__getitem__(item)
+
     def __setitem__(self, key, value):
         if hasattr(value, "__cuda_array_interface__"):
             gpu_view = storage_utils.gpu_view(self)
             gpu_view[key] = cp.asarray(value.data)
-            cp.cuda.Device(0).synchronize()
+            self.device_to_host(True)
             return value
         else:
             return super().__setitem__(key, value)
 
     @property
     def _is_clean(self):
-        return True
+        return not self._is_device_modified()
 
     @property
     def _is_host_modified(self):
@@ -306,16 +312,25 @@ class GPUStorage(Storage):
 
     @property
     def _is_device_modified(self):
-        return False
+        return id(self) in self._modified_storages
 
     def _set_clean(self):
-        pass
+        if not self._is_clean():
+            self._modified_storages.pop(id(self))
 
     def _set_host_modified(self):
         pass
 
     def _set_device_modified(self):
-        pass
+        self._modified_storages[id(self)] = self
+
+    def synchronize(self):
+        self.device_to_host()
+
+    def device_to_host(self, force=False):
+        if force or self._is_device_modified:
+            cp.cuda.Device(0).synchronize()
+            self._modified_storages.clear()
 
 
 class CPUStorage(Storage):
