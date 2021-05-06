@@ -22,10 +22,7 @@ import itertools
 import warnings
 from typing import (
     Any,
-    Callable,
     Dict,
-    Iterable,
-    Iterator,
     List,
     Optional,
     Sequence,
@@ -548,6 +545,8 @@ class MultiStageMergingWrapper:
             return False
         if candidate.iteration_order != self.iteration_order:
             return False
+        if candidate.all_horizontal_ifs(self):
+            return True
         if candidate.has_disallowed_read_with_offset_and_write(self):
             return False
         return True
@@ -562,6 +561,19 @@ class MultiStageMergingWrapper:
                 self._multi_stage.inputs[name] |= extent
             else:
                 self._multi_stage.inputs[name] = extent
+
+    def all_horizontal_ifs(self, target: "MultiStageMergingWrapper") -> bool:
+        for ij_block in self.ij_blocks:
+            for interval_block in ij_block.interval_blocks:
+                for statement_info in interval_block.stmts:
+                    if not isinstance(statement_info.stmt, gt_ir.HorizontalIf):
+                        return False
+        for ij_block in target.ij_blocks:
+            for interval_block in ij_block.interval_blocks:
+                for statement_info in interval_block.stmts:
+                    if not isinstance(statement_info.stmt, gt_ir.HorizontalIf):
+                        return False
+        return True
 
     def has_disallowed_read_with_offset_and_write(self, target: "MultiStageMergingWrapper") -> bool:
         write_after_read_fields = {"all": self.write_after_read_fields_in(target)}
@@ -699,6 +711,10 @@ class StageMergingWrapper:
         if self.has_incompatible_intervals_with(candidate):
             return False
 
+        # Merge if all statements are horizontal ifs
+        if self.all_horizontal_ifs(candidate):
+            return True
+
         # Check that there are not data dependencies between stages
         if self.has_data_dependencies_with(candidate):
             return False
@@ -766,6 +782,17 @@ class StageMergingWrapper:
             if self.intervals_overlap_or_imply_reorder(interval, candidate_interval):
                 return True
         return False
+
+    def all_horizontal_ifs(self, candidate: "StageMergingWrapper") -> bool:
+        for interval_block in self.interval_blocks:
+            for statement_info in interval_block.stmts:
+                if not isinstance(statement_info.stmt, gt_ir.HorizontalIf):
+                    return False
+        for interval_block in candidate.interval_blocks:
+            for statement_info in interval_block.stmts:
+                if not isinstance(statement_info.stmt, gt_ir.HorizontalIf):
+                    return False
+        return True
 
     def has_data_dependencies_with(self, candidate: "StageMergingWrapper") -> bool:
         extents = (extent for name, extent in candidate.inputs.items() if name in self.outputs)
