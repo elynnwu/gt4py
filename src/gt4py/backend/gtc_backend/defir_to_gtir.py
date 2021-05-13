@@ -57,6 +57,10 @@ def transform_offset(offset: Dict[str, int]) -> gtir.CartesianOffset:
     return gtir.CartesianOffset(i=i, j=j, k=k)
 
 
+def is_sequential_assign(i: AxisInterval, j: AxisInterval) -> bool:
+    return abs(i.end.offset - i.start.offset) < 2 and abs(j.end.offset - j.start.offset) < 2
+
+
 class DefIRToGTIR(IRNodeVisitor):
 
     GT4PY_ITERATIONORDER_TO_GTIR_LOOPORDER = {
@@ -183,13 +187,14 @@ class DefIRToGTIR(IRNodeVisitor):
     def visit_BlockStmt(self, node: BlockStmt) -> List[gtir.Stmt]:
         return [self.visit(s) for s in node.stmts]
 
-    def visit_HorizontalIf(self, node: HorizontalIf) -> gtir.HorizontalIf:
+    def visit_HorizontalIf(self, node: HorizontalIf, **kwargs) -> gtir.HorizontalRegion:
         axes = {}
+        max_offset = 1000
         for axis in Domain.LatLonGrid().parallel_axes:
             interval = node.intervals[axis.name]
 
             bound = interval.start
-            if bound.offset < -1000:
+            if bound.offset < -max_offset:
                 start_bound = common.AxisEndpoint.START
             else:
                 start_bound = common.AxisBound(
@@ -202,7 +207,7 @@ class DefIRToGTIR(IRNodeVisitor):
                 )
 
             bound = interval.end
-            if bound.offset > 1000:
+            if bound.offset > max_offset:
                 end_bound = common.AxisEndpoint.END
             else:
                 end_bound = common.AxisBound(
@@ -214,16 +219,24 @@ class DefIRToGTIR(IRNodeVisitor):
                     offset=bound.offset,
                 )
 
-            axes[axis.name] = common.AxisInterval(start=start_bound, end=end_bound)
+            axes[axis.name.lower()] = common.AxisInterval(start=start_bound, end=end_bound)
 
-        return gtir.HorizontalIf(
-            i=axes["I"], j=axes["J"], body=[self.visit(stmt) for stmt in node.body.stmts]
+        return gtir.HorizontalRegion(
+            i=axes["i"],
+            j=axes["j"],
+            body=[
+                self.visit(stmt, is_sequential_assign=is_sequential_assign(**axes))
+                for stmt in node.body.stmts
+            ],
         )
 
-    def visit_Assign(self, node: Assign) -> gtir.ParAssignStmt:
+    def visit_Assign(self, node: Assign, **kwargs) -> gtir.ParAssignStmt:
         assert isinstance(node.target, FieldRef) or isinstance(node.target, VarRef)
         left = self.visit(node.target)
-        return gtir.ParAssignStmt(left=left, right=self.visit(node.value))
+        right = self.visit(node.value)
+        if kwargs.get("is_sequential_assign", False):
+            return gtir.SeqAssignStmt(left=left, right=right)
+        return gtir.ParAssignStmt(left=left, right=right)
 
     def visit_ScalarLiteral(self, node: ScalarLiteral) -> gtir.Literal:
         return gtir.Literal(value=str(node.value), dtype=common.DataType(node.data_type.value))
@@ -269,7 +282,9 @@ class DefIRToGTIR(IRNodeVisitor):
 
     def visit_FieldRef(self, node: FieldRef):
         return gtir.FieldAccess(
-            name=node.name, offset=transform_offset(node.offset), data_index=node.data_index
+            name=node.name,
+            offset=transform_offset(node.offset),
+            data_index=node.data_index,
         )
 
     def visit_If(self, node: If):
@@ -307,7 +322,8 @@ class DefIRToGTIR(IRNodeVisitor):
     def visit_AxisBound(self, node: AxisBound):
         # TODO(havogt) add support VarRef
         return gtir.AxisBound(
-            level=self.GT4PY_LEVELMARKER_TO_GTIR_LEVELMARKER[node.level], offset=node.offset
+            level=self.GT4PY_LEVELMARKER_TO_GTIR_LEVELMARKER[node.level],
+            offset=node.offset,
         )
 
     def visit_FieldDecl(self, node: FieldDecl):

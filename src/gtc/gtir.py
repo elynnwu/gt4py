@@ -75,7 +75,7 @@ class FieldAccess(common.FieldAccess, Expr):  # type: ignore
     pass
 
 
-class HorizontalIf(common.HorizontalIf[Stmt], Stmt):
+class HorizontalRegion(common.HorizontalRegion[Stmt], Stmt):
     pass
 
 
@@ -111,6 +111,22 @@ class ParAssignStmt(common.AssignStmt[FieldAccess, Expr], Stmt):
                 raise ValueError("Self-assignment with offset is illegal.")
 
         return values
+
+    _dtype_validation = common.assign_stmt_dtype_validation(strict=False)
+
+
+class SeqAssignStmt(common.AssignStmt[FieldAccess, Expr], Stmt):
+    """Sequential assignment.
+
+    R.h.s. is evaluated for a single point so no race conditions are possible
+    (GTScript parallel model).
+    """
+
+    @validator("left")
+    def no_horizontal_offset_in_assignment(cls, v: Expr) -> Expr:
+        if v.offset.i != 0 or v.offset.j != 0:
+            raise ValueError("Lhs of assignment must not have a horizontal offset.")
+        return v
 
     _dtype_validation = common.assign_stmt_dtype_validation(strict=False)
 

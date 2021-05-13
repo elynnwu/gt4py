@@ -741,7 +741,7 @@ class AxisInterval(Node):
     end: Union[AxisEndpoint, AxisBound]
 
 
-class HorizontalIf(GenericNode, Generic[StmtT]):
+class HorizontalRegion(GenericNode, Generic[StmtT]):
     i: AxisInterval
     j: AxisInterval
     body: List[StmtT]

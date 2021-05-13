@@ -166,6 +166,15 @@ class Interval(LocNode):
 class HorizontalExecution(LocNode):
     body: List[Stmt]
     declarations: List[LocalScalar]
+    i: Optional[common.AxisInterval] = None
+    j: Optional[common.AxisInterval] = None
+
+    @root_validator
+    def valid_axis_intervals(cls, values: Dict[str, Any]) -> Dict[str, Any]:
+        i, j = values["i"], values["j"]
+        if (i is None and j is not None) or (i is not None and j is None):
+            raise ValueError("Both I and J axis intervals must be specified")
+        return values
 
 
 class CacheDesc(LocNode):

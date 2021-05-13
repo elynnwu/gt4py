@@ -15,11 +15,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from dataclasses import dataclass, field
-from typing import Any, List
+from typing import Any, List, Optional, Union
 
 from eve import NodeTranslator
 from gtc import gtir, oir
-from gtc.common import CartesianOffset, DataType, LogicalOperator, UnaryOperator
+from gtc.common import AxisInterval, CartesianOffset, DataType, LogicalOperator, UnaryOperator
 
 
 def _create_mask(ctx: "GTIRToOIR.Context", name: str, cond: oir.Expr) -> oir.Temporary:
@@ -56,6 +56,8 @@ class GTIRToOIR(NodeTranslator):
 
         decls: List = field(default_factory=list)
         horizontal_executions: List = field(default_factory=list)
+        i_interval: Optional[AxisInterval] = None
+        j_interval: Optional[AxisInterval] = None
 
         def add_decl(self, decl: oir.Decl) -> "GTIRToOIR.Context":
             self.decls.append(decl)
@@ -68,21 +70,52 @@ class GTIRToOIR(NodeTranslator):
             return self
 
     def visit_ParAssignStmt(
-        self, node: gtir.ParAssignStmt, *, mask: oir.Expr = None, ctx: Context, **kwargs: Any
+        self,
+        node: gtir.ParAssignStmt,
+        *,
+        mask: oir.Expr = None,
+        ctx: Context,
+        **kwargs: Any,
+    ) -> None:
+        self.visit_AssignStmt(node, mask=mask, ctx=ctx, **kwargs)
+
+    def visit_SeqAssignStmt(
+        self,
+        node: gtir.SeqAssignStmt,
+        *,
+        mask: oir.Expr = None,
+        ctx: Context,
+        **kwargs: Any,
+    ) -> None:
+        self.visit_AssignStmt(node, mask=mask, ctx=ctx, **kwargs)
+
+    def visit_AssignStmt(
+        self,
+        node: Union[gtir.ParAssignStmt, gtir.SeqAssignStmt],
+        *,
+        mask: oir.Expr = None,
+        ctx: Context,
+        **kwargs: Any,
     ) -> None:
         body = [oir.AssignStmt(left=self.visit(node.left), right=self.visit(node.right))]
         if mask is not None:
             body = [oir.MaskStmt(body=body, mask=mask)]
+
         ctx.add_horizontal_execution(
             oir.HorizontalExecution(
                 body=body,
                 declarations=[],
+                i=ctx.i_interval,
+                j=ctx.j_interval,
             ),
         )
 
     def visit_FieldAccess(self, node: gtir.FieldAccess, **kwargs: Any) -> oir.FieldAccess:
         return oir.FieldAccess(
-            name=node.name, offset=node.offset, data_index=node.data_index, dtype=node.dtype
+            name=node.name,
+            offset=node.offset,
+            data_index=node.data_index,
+            dtype=node.dtype,
         )
 
     def visit_ScalarAccess(self, node: gtir.ScalarAccess, **kwargs: Any) -> oir.ScalarAccess:
@@ -109,7 +142,10 @@ class GTIRToOIR(NodeTranslator):
 
     def visit_FieldDecl(self, node: gtir.FieldDecl, **kwargs: Any) -> oir.FieldDecl:
         return oir.FieldDecl(
-            name=node.name, dtype=node.dtype, dimensions=node.dimensions, data_dims=node.data_dims
+            name=node.name,
+            dtype=node.dtype,
+            dimensions=node.dimensions,
+            data_dims=node.data_dims,
         )
 
     def visit_ScalarDecl(self, node: gtir.ScalarDecl, **kwargs: Any) -> oir.ScalarDecl:
@@ -121,11 +157,18 @@ class GTIRToOIR(NodeTranslator):
         )
 
     def visit_FieldIfStmt(
-        self, node: gtir.FieldIfStmt, *, mask: oir.Expr = None, ctx: Context, **kwargs: Any
+        self,
+        node: gtir.FieldIfStmt,
+        *,
+        mask: oir.Expr = None,
+        ctx: Context,
+        **kwargs: Any,
     ) -> None:
         mask_field_decl = _create_mask(ctx, f"mask_{id(node)}", self.visit(node.cond))
         current_mask = oir.FieldAccess(
-            name=mask_field_decl.name, offset=CartesianOffset.zero(), dtype=mask_field_decl.dtype
+            name=mask_field_decl.name,
+            offset=CartesianOffset.zero(),
+            dtype=mask_field_decl.dtype,
         )
         combined_mask = current_mask
         if mask:
@@ -142,10 +185,22 @@ class GTIRToOIR(NodeTranslator):
                 ctx=ctx,
             )
 
+    def visit_HorizontalRegion(
+        self, node: gtir.HorizontalRegion, *, ctx: Context, **kwargs: Any
+    ) -> None:
+        ctx.i_interval, ctx.j_interval = node.i, node.j
+        for stmt in node.body:
+            self.visit(stmt, ctx=ctx)
+
     # For now we represent ScalarIf (and FieldIf) both as masks on the HorizontalExecution.
     # This is not meant to be set in stone...
     def visit_ScalarIfStmt(
-        self, node: gtir.ScalarIfStmt, *, mask: oir.Expr = None, ctx: Context, **kwargs: Any
+        self,
+        node: gtir.ScalarIfStmt,
+        *,
+        mask: oir.Expr = None,
+        ctx: Context,
+        **kwargs: Any,
     ) -> None:
         current_mask = self.visit(node.cond)
         combined_mask = current_mask
