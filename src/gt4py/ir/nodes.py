@@ -120,6 +120,7 @@ storing a reference to the piece of source code which originated the node.
                 | While(condition: expr, body: BlockStmt)
                 | HorizontalIf(intervals: Dict[str, Interval], body: BlockStmt)
                 | BlockStmt
+                | For(target: Decl, start: AxisBound | Expr, stop: AxisBound | Expr, body: BlockStmt)
 
     AxisBound(level: LevelMarker | VarRef, offset: int)
         # bound = level + offset
@@ -418,8 +419,9 @@ class Cast(Expr):
 
 @attribclass
 class AxisIndex(Expr):
-    axis = attribute(of=str)
-    data_type = attribute(of=DataType, default=DataType.INT32)
+    # axis = attribute(of=str)
+    # data_type = attribute(of=DataType, default=DataType.INT32)
+    name = attribute(of=str)
 
 
 @attribclass
@@ -742,6 +744,17 @@ class AxisInterval(Node):
 class HorizontalIf(Statement):
     intervals = attribute(of=DictOf[str, AxisInterval])
     body = attribute(of=BlockStmt)
+
+
+# TODO: Relocate this in the file next to other Statement nodes
+# Issue: depends on AxisInterval which is defined below
+@attribclass
+class For(Statement):
+    target = attribute(of=VarDecl)
+    start = attribute(of=UnionOf[AxisBound, Expr])
+    stop = attribute(of=UnionOf[AxisBound, Expr])
+    body = attribute(of=BlockStmt)
+    loc = attribute(of=Location, optional=True)
 
 
 @attribclass
